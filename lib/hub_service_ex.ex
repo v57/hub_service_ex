@@ -89,6 +89,8 @@ defmodule HubServiceEx do
   Calls an API through the hub. Raises if the service has not been started.
   Returns `{:ok, response}` or `{:error, reason}`.
   """
+  def send(service, path, body \\ nil, context \\ nil, timeout \\ 5_000)
+
   def send(%__MODULE__{conn: nil}, _path, _body, _context, _timeout) do
     raise "Service not started"
   end
@@ -102,6 +104,8 @@ defmodule HubServiceEx do
   Opens a stream call through the hub. Raises if the service has not been
   started. Returns a lazy `Stream` of values.
   """
+  def values(service, path, body \\ nil, context \\ nil)
+
   def values(%__MODULE__{conn: nil}, _path, _body, _context) do
     raise "Service not started"
   end
@@ -148,12 +152,17 @@ defmodule HubServiceEx do
             do: entry ++ [{"permissions", settings[:permissions]}],
             else: entry
 
-        if settings[:limit] != nil, do: entry ++ [{"limit", settings[:limit]}], else: entry
+        entry =
+          if settings[:limit] != nil,
+            do: entry ++ [{"limit", settings[:limit]}],
+            else: entry
+
+        {entry}
       end)
 
     apps =
       Enum.map(service.apps, fn header ->
-        [{"type", "app"}, {"name", header.name}, {"path", header.path}]
+        {[{"type", "app"}, {"name", header.name}, {"path", header.path}]}
       end)
 
     {[{"services", services}, {"apps", apps}]}
@@ -197,7 +206,8 @@ defmodule HubServiceEx do
 
         entry = [{"group", group}]
         entry = if name, do: entry ++ [{"name", name}], else: entry
-        if allows != nil, do: entry ++ [{"allows", allows}], else: entry
+        entry = if allows != nil, do: entry ++ [{"allows", allows}], else: entry
+        {entry}
       end
 
     out = []
