@@ -70,6 +70,44 @@ defmodule HubServiceEx do
   end
 
   @doc """
+  Calls an API through the hub. Raises if the service has not been started.
+  Returns `{:ok, response}` or `{:error, reason}`.
+  """
+  def send(%__MODULE__{conn: nil}, _path, _body, _context, _timeout) do
+    raise "Service not started"
+  end
+
+  def send(%__MODULE__{conn: conn}, path, body, context, timeout) do
+    sender = Connection.sender(conn)
+    ChannelEx.send(sender, path, body, context, timeout)
+  end
+
+  @doc """
+  Opens a stream call through the hub. Raises if the service has not been
+  started. Returns a lazy `Stream` of values.
+  """
+  def values(%__MODULE__{conn: nil}, _path, _body, _context) do
+    raise "Service not started"
+  end
+
+  def values(%__MODULE__{conn: conn}, path, body, context) do
+    sender = Connection.sender(conn)
+    ChannelEx.values(sender, path, body, context)
+  end
+
+  @doc """
+  Connects to the hub. On every (re)connect sends `hub/profile/update` (if a
+  profile is set) then `hub/service/update`. Reconnects automatically.
+  """
+  def start(%__MODULE__{conn: nil} = service) do
+    {:ok, conn} = Connection.start_link(service)
+    sender = Connection.sender(conn)
+    %{service | conn: conn, sender: sender}
+  end
+
+  def start(%__MODULE__{} = service), do: service
+
+  @doc """
   hub/profile/update payload (ordered jiffy object), or `nil` when no profile
   (name/icon) is set.
   """
