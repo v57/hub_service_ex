@@ -43,6 +43,33 @@ defmodule HubServiceEx do
   end
 
   @doc """
+  Registers a request/response API endpoint. `handler` receives the request
+  body and returns the response. `settings` (optional) is a keyword list or map
+  with `:permissions` (`group`/`name`/`allows`) and `:limit` (wire parity;
+  hub-lite ignores them).
+  """
+  def post(%__MODULE__{} = service, path, handler, settings \\ nil)
+      when is_binary(path) and is_function(handler, 1) do
+    service = add_path(service, path, settings)
+    channel = ChannelEx.post(service.channel, path, fn request -> handler.(request.body) end)
+    %{service | channel: channel}
+  end
+
+  @doc """
+  Registers a streaming API endpoint. `handler` receives the request body and
+  returns an enumerable of values to emit.
+  """
+  def stream(%__MODULE__{} = service, path, handler, settings \\ nil)
+      when is_binary(path) and is_function(handler, 1) do
+    service = add_path(service, path, settings)
+
+    channel =
+      ChannelEx.stream(service.channel, path, fn request -> handler.(request.body) end)
+
+    %{service | channel: channel}
+  end
+
+  @doc """
   hub/profile/update payload (ordered jiffy object), or `nil` when no profile
   (name/icon) is set.
   """
@@ -86,6 +113,42 @@ defmodule HubServiceEx do
 
     ChannelEx.Sender.request(sender, "hub/service/update", update_payload(service), nil)
     :ok
+  end
+
+  defp add_path(%__MODULE__{} = service, path, nil) do
+    %{service | paths: MapSet.put(service.paths, path)}
+  end
+
+  defp add_path(%__MODULE__{} = service, path, settings)
+       when is_map(settings) or is_list(settings) do
+    %{
+      service
+      | paths: MapSet.put(service.paths, path),
+        settings: Map.put(service.settings, path, normalize_settings(settings, path))
+    }
+  end
+
+  defp normalize_settings(settings, path) do
+    settings = if is_map(settings), do: Map.to_list(settings), else: settings
+    permissions = Keyword.get(settings, :permissions)
+    limit = Keyword.get(settings, :limit)
+
+    permissions =
+      if permissions do
+        permissions = if is_map(permissions), do: Map.to_list(permissions), else: permissions
+        group = Keyword.get(permissions, :group)
+        name = Keyword.get(permissions, :name)
+        allows = Keyword.get(permissions, :allows)
+        group = if group in [nil, ""], do: path |> String.split("/") |> hd(), else: group
+
+        entry = [{"group", group}]
+        entry = if name, do: entry ++ [{"name", name}], else: entry
+        if allows != nil, do: entry ++ [{"allows", allows}], else: entry
+      end
+
+    out = []
+    out = if permissions, do: out ++ [permissions: permissions], else: out
+    if limit != nil, do: out ++ [limit: limit], else: out
   end
 
   defp build_profile(name, icon) do
