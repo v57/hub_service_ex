@@ -70,6 +70,22 @@ defmodule HubServiceEx do
   end
 
   @doc """
+  Registers an app: its header is appended to the hub apps list and its path
+  serves the AppInterface (all 5 keys: header/body/top/bottom/data) as a
+  stream. The app path is also callable and appears in the services list.
+  """
+  def app(%__MODULE__{} = service, %HubServiceEx.App{} = app) do
+    service = %{service | apps: service.apps ++ [app.header]}
+    service = add_path(service, app.header.path, nil)
+    interface = HubServiceEx.App.interface(app)
+
+    channel =
+      ChannelEx.stream(service.channel, app.header.path, fn _request -> [interface] end)
+
+    %{service | channel: channel}
+  end
+
+  @doc """
   Calls an API through the hub. Raises if the service has not been started.
   Returns `{:ok, response}` or `{:error, reason}`.
   """
