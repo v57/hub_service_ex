@@ -3,8 +3,9 @@ defmodule HubServiceEx do
   HubServiceEx — Elixir port of the hub-service library (TS reference).
 
   Lets an Elixir process connect to a hub (hub-lite/hub-pro), host post/stream
-  API endpoints, and call API through the hub. Lite port: no auth, no keychain,
-  no crypto.
+  API endpoints, and call API through the hub. Every connection carries
+  hub-pro auth headers (a freshly signed keychain token + `v: "0"`); hub-lite
+  ignores them (regression-safe).
 
   Wire parity: `hub/profile/update` and `hub/service/update` payloads are built
   as ordered jiffy objects (tuple-wrapped proplists) so the JSON bytes match the
@@ -19,6 +20,7 @@ defmodule HubServiceEx do
             apps: [],
             paths: MapSet.new(),
             settings: %{},
+            sign: nil,
             conn: nil,
             sender: nil
 
@@ -31,15 +33,19 @@ defmodule HubServiceEx do
     * `:address` — port integer or `ws://` URL (default: `1997` or `$HUB`)
     * `:name` — profile name shown in the hub
     * `:icon` — profile icon: a string or `%{symbol: ..., text: ...}`
+    * `:sign` — 0-arity fun returning a fresh hub-pro auth token
+      (default: `HubServiceEx.Keychain.sign/0` — the `auth` key file in the
+      cwd, TS parity)
   """
   def new(options \\ []) do
     address = normalize_address(options[:address] || System.get_env("HUB") || 1997)
     name = options[:name]
     icon = options[:icon]
+    sign = options[:sign] || (&HubServiceEx.Keychain.sign/0)
 
     profile = if name || icon, do: build_profile(name, icon), else: nil
 
-    %__MODULE__{channel: ChannelEx.new(), address: address, profile: profile}
+    %__MODULE__{channel: ChannelEx.new(), address: address, profile: profile, sign: sign}
   end
 
   @doc """

@@ -5,7 +5,10 @@ defmodule HubServiceEx.Connection do
   # monitors the socket and re-dials on disconnect. On every (re)connect the
   # socket's on_connect callback fires `HubServiceEx.send_updates/2`, which
   # re-sends hub/profile/update + hub/service/update (hub-lite drops a
-  # sender's services on disconnect).
+  # sender's services on disconnect). Every (re)connect also carries fresh
+  # hub-pro auth headers ({auth: <signed token>, v: "0"}) — the headers fun
+  # is invoked once per socket init by channel_ex, so the token is always
+  # freshly signed (TS reference parity). hub-lite ignores the headers.
 
   use GenServer
 
@@ -69,6 +72,7 @@ defmodule HubServiceEx.Connection do
 
     client =
       ChannelEx.connect(service.channel, service.address,
+        headers: fn -> %{"auth" => service.sign.(), "v" => "0"} end,
         on_connect: fn sender -> HubServiceEx.send_updates(service, sender) end
       )
 
