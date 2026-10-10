@@ -70,14 +70,18 @@ defmodule HubServiceEx.Connection do
   defp connect(%{service: service, retry: retry} = state) do
     if retry, do: Process.cancel_timer(retry)
 
-    client =
-      ChannelEx.connect(service.channel, service.address,
-        headers: fn -> %{"auth" => service.sign.(), "v" => "0"} end,
-        on_connect: fn sender -> HubServiceEx.send_updates(service, sender) end
-      )
+    case ChannelEx.connect(service.channel, service.address,
+           headers: fn -> %{"auth" => service.sign.(), "v" => "0"} end,
+           on_connect: fn sender -> HubServiceEx.send_updates(service, sender) end
+         ) do
+      %ChannelEx.ClientSender{} = client ->
+        mon = Process.monitor(client.ws)
+        %{state | sender: client.sender, mon: mon, retry: nil}
 
-    mon = Process.monitor(client.ws)
-    %{state | sender: client.sender, mon: mon, retry: nil}
+      # Refused connection, failed handshake or silent hub: retry later.
+      {:error, _reason} ->
+        schedule_reconnect(state)
+    end
   rescue
     _ -> schedule_reconnect(state)
   catch
