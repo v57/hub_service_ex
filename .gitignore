@@ -7,3 +7,5 @@ erl_crash.dump
 *.ez
 hub_service_ex-*.tar
 /auth
+CLAUDE.md
+/.claude
