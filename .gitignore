@@ -9,3 +9,19 @@ hub_service_ex-*.tar
 /auth
 CLAUDE.md
 /.claude
+
+# macOS
+.DS_Store
+# Finder folder icon: a file named Icon plus a carriage return
+Icon[]
+
+# Secrets
+.env
+
+# Agents (local agent instructions, settings and boards)
+AGENTS.md
+.claude/
+.codex/
+.commandcode/
+.hermes/
+KANBAN*.md
