@@ -19,7 +19,7 @@ defmodule HubServiceEx.MixProject do
 
   defp deps do
     [
-      {:channel_ex, path: "../channel_ex"}
+      {:channel_ex, path: "../../Channel/channel_ex"}
     ]
   end
 end
