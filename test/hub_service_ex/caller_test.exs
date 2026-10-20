@@ -6,10 +6,19 @@ defmodule HubServiceEx.CallerTest do
   test "no hub context means no caller" do
     assert Caller.from_context(nil) == nil
     assert Caller.from_context(%{"service" => "x"}) == nil
-    request = Request.from(%{path: "echo", body: "hi", context: %{}})
+    request = Request.from(%{path: "echo", body: "hi", context: %{}}, "hub")
     assert request.caller == nil
     assert request.hub_key == nil
     assert request.context == %{}
+  end
+
+  test "the caller only from the pinned hub" do
+    context = %{"hub" => %{"caller" => %{"key" => "k", "owner" => true}, "hubKey" => "hub-a"}}
+    request = %{path: "p", body: nil, context: context}
+    assert Request.from(request, "hub-a").caller.key == "k"
+    assert Request.from(request, "hub-b").caller == nil
+    assert Request.from(request, nil).caller == nil
+    assert Request.from(request, nil).hub_key == "hub-a"
   end
 
   test "an anonymous caller has no key or device" do

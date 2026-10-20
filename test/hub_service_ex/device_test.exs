@@ -70,15 +70,8 @@ defmodule HubServiceEx.DeviceTest do
              "s3-local/Backup Disk"
 
     assert HubServiceEx.instance(service(ctx, name: "Backup")) == "Backup"
-    by_path = service(ctx, [])
-    assert HubServiceEx.instance(by_path) == "service"
-
-    by_path =
-      by_path
-      |> HubServiceEx.post("s3/read", & &1)
-      |> HubServiceEx.post("other/x", & &1)
-
-    assert HubServiceEx.instance(by_path) == "s3"
+    unnamed = ctx |> service([]) |> HubServiceEx.post("s3/read", & &1)
+    assert HubServiceEx.instance(unnamed) == Path.basename(File.cwd!())
   end
 
   test "parent is declared", ctx do

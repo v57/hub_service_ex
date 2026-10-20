@@ -44,7 +44,7 @@ Run the example: `mix run example/echo.exs`
   the service key signed by the device key (`~/.hub/device.key`, `$HUB_DEVICE_KEY` or
   `:device_key_path`, created 0600; `:device_key` for a `KeyFile` kept elsewhere), renewed at
   connect with less than a day left. `:instance` names the service on its device (default: profile
-  name, else first path segment, else `service`); `:device_name`, `:platform`, `:parent` override
+  name, else the working directory's name, else `service`); `:device_name`, `:platform`, `:parent` override
   the suggestions; `device: false` turns it off.
 - `post(path, handler, settings \\ nil)` — request/response endpoint; handler receives the request
   body and returns the response. `settings` (wire parity, hub-lite ignores): `permissions:
@@ -53,7 +53,8 @@ Run the example: `mix run example/echo.exs`
 - `post(path, fn body, request -> ... end)` — a 2-arity handler also gets the
   `HubServiceEx.Request`: `caller` (who is calling, from the hub's `context.hub.caller`: `key`,
   `device_id`, `device_name`, `groups`, `owner`, and `via`/`claimed` through a merged hub; nil on
-  hubs that don't send it), `hub_key` and the whole `context`.
+  hubs that don't send it, and unless the request's `context.hub.hubKey` is the pinned hub key),
+  `hub_key` and the whole `context`.
 - `stream(path, handler, settings \\ nil)` — streaming endpoint; handler receives the body (and,
   with arity 2, the request) and returns an enumerable of values.
 - `app(App)` — append the app header to the hub apps list and serve the AppInterface (all 5 keys:

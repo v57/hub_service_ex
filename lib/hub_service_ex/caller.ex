@@ -59,7 +59,8 @@ defmodule HubServiceEx.Request do
 
     * `:path` — the API path called
     * `:body` — the request body
-    * `:caller` — who is calling (`context.hub.caller`); nil when the hub sent none
+    * `:caller` — who is calling (`context.hub.caller`); nil when the hub sent none or when its
+      `context.hub.hubKey` isn't the hub key this service pinned
     * `:hub_key` — the forwarding hub's SPKI (`context.hub.hubKey`); nil when the hub sent none
     * `:context` — the whole request context (selection keys such as `service` and `device` included)
   """
@@ -71,14 +72,18 @@ defmodule HubServiceEx.Request do
   @type t :: %__MODULE__{}
 
   @doc false
-  def from(%{path: path, body: body} = request) do
+  # The request for a channel_ex request. The caller is trusted only when the
+  # context names `pinned_hub_key` as its hub (TS parity), so a service
+  # without a pinned key sees no caller.
+  def from(%{path: path, body: body} = request, pinned_hub_key) do
     context = if is_map(request[:context]), do: request.context, else: %{}
+    hub_key = Caller.hub_key(context)
 
     %__MODULE__{
       path: path,
       body: body,
-      caller: Caller.from_context(context),
-      hub_key: Caller.hub_key(context),
+      caller: if(pinned_hub_key != nil and pinned_hub_key == hub_key, do: Caller.from_context(context)),
+      hub_key: hub_key,
       context: context
     }
   end

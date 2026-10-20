@@ -41,6 +41,7 @@ defmodule HubServiceEx.Connection do
   @impl true
   def init(service) do
     Process.flag(:trap_exit, true)
+    HubServiceEx.put_current_hub_key(service, service.hub_key)
 
     state = %{
       service: service,
@@ -72,7 +73,10 @@ defmodule HubServiceEx.Connection do
 
   def handle_call(:hub_key, _from, state), do: {:reply, state.hub_key, state}
   def handle_call(:last_error, _from, state), do: {:reply, state.last_error, state}
-  def handle_call(:forget_hub_key, _from, state), do: {:reply, :ok, %{state | hub_key: nil}}
+  def handle_call(:forget_hub_key, _from, state) do
+    HubServiceEx.put_current_hub_key(state.service, nil)
+    {:reply, :ok, %{state | hub_key: nil}}
+  end
 
   @impl true
   def handle_info({:connected, client_ws, sender}, state) do
@@ -109,6 +113,8 @@ defmodule HubServiceEx.Connection do
         rescue
           _ -> :ok
         end
+
+        HubServiceEx.put_current_hub_key(state.service, key)
 
         # Pinned the hub key: reconnect at once with a v1 token.
         {:noreply, state |> Map.put(:hub_key, key) |> drop_client() |> connect()}
@@ -195,12 +201,14 @@ defmodule HubServiceEx.Connection do
   defp report_error(state, headers, reason) do
     message = if is_exception(reason), do: Exception.message(reason), else: inspect(reason)
 
-    if headers["v"] == "1" and message != state.last_error do
+    # hub-pro refuses a bad token with HTTP 401 (a failed handshake here); its reason (invalid
+    # signature, key revoked) stays on the hub.
+    if headers["v"] == "1" and match?({:handshake_failed, _}, reason) and message != state.last_error do
       IO.puts(
         :stderr,
         "hub-service: the hub at #{HubServiceEx.address_key(state.service)} refused the v1 connect for " <>
-          "hub key #{state.hub_key} (#{message}). If it says invalid signature, the hub key changed or a " <>
-          "different server answers; call forget_hub_key/1 if the change is expected."
+          "hub key #{state.hub_key} (#{message}). If the hub key changed or a different server answers, " <>
+          "call forget_hub_key/1."
       )
     end
 

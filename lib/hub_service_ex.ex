@@ -33,10 +33,10 @@ defmodule HubServiceEx do
             profile: nil,
             apps: [],
             paths: MapSet.new(),
-            path_order: [],
             settings: %{},
             sign: nil,
             hub_key: nil,
+            key_ref: nil,
             pins: nil,
             device: true,
             device_key: nil,
@@ -69,8 +69,8 @@ defmodule HubServiceEx do
     * `:device_key_path` — the device key file; default
       `HubServiceEx.Device.default_key_path/0`
     * `:instance` — the instance name on this device (`s3-local/Backup Disk`);
-      default: the profile name, else the first segment of the first
-      registered path, else `service`
+      default: the profile name, else the working directory's name, else
+      `service`
     * `:device_name` — the suggested device name; default: the computer name
     * `:platform` — the certificate platform; default: this OS
     * `:parent` — the declared parent device name (containers and VMs)
@@ -91,6 +91,7 @@ defmodule HubServiceEx do
       profile: profile,
       sign: sign,
       hub_key: hub_key,
+      key_ref: make_ref(),
       pins: pins,
       device: Keyword.get(options, :device, true),
       device_key: options[:device_key],
@@ -104,8 +105,7 @@ defmodule HubServiceEx do
 
   @doc """
   The instance name the certificate carries: the `:instance` option, else
-  the profile name, else the first segment of the first registered path,
-  else `service`.
+  the profile name, else the working directory's name, else `service`.
   """
   def instance(%__MODULE__{} = service) do
     profile_name =
@@ -117,7 +117,7 @@ defmodule HubServiceEx do
     cond do
       service.instance not in [nil, ""] -> service.instance
       profile_name not in [nil, ""] -> profile_name
-      service.path_order != [] -> service.path_order |> List.last() |> String.split("/") |> hd()
+      (directory = Path.basename(File.cwd!())) != "" -> directory
       true -> "service"
     end
   end
@@ -139,6 +139,13 @@ defmodule HubServiceEx do
   def hub_key(%__MODULE__{conn: nil, hub_key: hub_key}), do: hub_key
   def hub_key(%__MODULE__{conn: conn}), do: Connection.hub_key(conn)
 
+  @doc false
+  # The pinned hub key as handlers see it: the connection publishes it under
+  # the service's ref, since handlers run in the socket process.
+  def put_current_hub_key(%__MODULE__{key_ref: ref}, key), do: :persistent_term.put({__MODULE__, :hub_key, ref}, key)
+
+  defp current_hub_key(ref, fallback), do: :persistent_term.get({__MODULE__, :hub_key, ref}, fallback)
+
   @doc "The last connect error (e.g. a refused v1 connect), or nil."
   def last_error(%__MODULE__{conn: nil}), do: nil
   def last_error(%__MODULE__{conn: conn}), do: Connection.last_error(conn)
@@ -151,6 +158,7 @@ defmodule HubServiceEx do
   def forget_hub_key(%__MODULE__{} = service) do
     if service.pins, do: HubServiceEx.HubPins.remove(service.pins, address_key(service))
     if service.conn, do: Connection.forget_hub_key(service.conn)
+    put_current_hub_key(service, nil)
     %{service | hub_key: nil}
   end
 
@@ -208,14 +216,15 @@ defmodule HubServiceEx do
   Registers a request/response API endpoint. `handler` receives the request
   body and returns the response; a 2-arity handler also receives the
   `HubServiceEx.Request` with the caller identity the hub forwards
-  (`request.caller`) and the whole request context. `settings` (optional) is
+  (`request.caller`, only when the request's hub key is the pinned one) and
+  the whole request context. `settings` (optional) is
   a keyword list or map with `:permissions` (`group`/`name`/`allows`) and
   `:limit` (wire parity; hub-lite ignores them).
   """
   def post(%__MODULE__{} = service, path, handler, settings \\ nil)
       when is_binary(path) and (is_function(handler, 1) or is_function(handler, 2)) do
     service = add_path(service, path, settings)
-    channel = ChannelEx.post(service.channel, path, fn request -> call(handler, request) end)
+    channel = ChannelEx.post(service.channel, path, handler_fun(service, handler))
     %{service | channel: channel}
   end
 
@@ -228,13 +237,18 @@ defmodule HubServiceEx do
       when is_binary(path) and (is_function(handler, 1) or is_function(handler, 2)) do
     service = add_path(service, path, settings)
 
-    channel = ChannelEx.stream(service.channel, path, fn request -> call(handler, request) end)
+    channel = ChannelEx.stream(service.channel, path, handler_fun(service, handler))
 
     %{service | channel: channel}
   end
 
-  defp call(handler, request) when is_function(handler, 1), do: handler.(request.body)
-  defp call(handler, request), do: handler.(request.body, HubServiceEx.Request.from(request))
+  defp handler_fun(_service, handler) when is_function(handler, 1), do: fn request -> handler.(request.body) end
+
+  defp handler_fun(%__MODULE__{key_ref: ref, hub_key: hub_key}, handler) do
+    fn request ->
+      handler.(request.body, HubServiceEx.Request.from(request, current_hub_key(ref, hub_key)))
+    end
+  end
 
   @doc """
   Registers an app: its header is appended to the hub apps list and its path
@@ -346,7 +360,7 @@ defmodule HubServiceEx do
   end
 
   defp add_path(%__MODULE__{} = service, path, nil) do
-    %{service | paths: MapSet.put(service.paths, path), path_order: remember_path(service, path)}
+    %{service | paths: MapSet.put(service.paths, path)}
   end
 
   defp add_path(%__MODULE__{} = service, path, settings)
@@ -354,14 +368,8 @@ defmodule HubServiceEx do
     %{
       service
       | paths: MapSet.put(service.paths, path),
-        path_order: remember_path(service, path),
         settings: Map.put(service.settings, path, normalize_settings(settings, path))
     }
-  end
-
-  # Registration order, newest first (the instance defaults to the oldest).
-  defp remember_path(service, path) do
-    if path in service.path_order, do: service.path_order, else: [path | service.path_order]
   end
 
   defp normalize_settings(settings, path) do
