@@ -1,5 +1,5 @@
 defmodule HubServiceEx.FakeHubTest do
-  # End to end against a fake hub: hub/info pinning, the v1 reconnect and the device header.
+  # End to end against a fake hub: hub/info pinning, the v1 reconnect, the device header and caller identity.
   use ExUnit.Case, async: false
 
   alias HubServiceEx.Keychain
@@ -55,7 +55,17 @@ defmodule HubServiceEx.FakeHubTest do
         device_name: "Mac Studio",
         device_key_path: Path.join(tmp, "device.key")
       )
-      |> HubServiceEx.post("echo", fn body -> body end)
+      |> HubServiceEx.post("echo/caller", fn _body, request ->
+        caller = request.caller
+
+        %{
+          "key" => caller.key,
+          "device" => caller.device_name,
+          "owner" => caller.owner,
+          "hubKey" => request.hub_key,
+          "service" => request.context["service"]
+        }
+      end)
       |> HubServiceEx.start()
 
     assert_receive {:connect, first}, 5_000
@@ -76,5 +86,32 @@ defmodule HubServiceEx.FakeHubTest do
     assert payload["instance"] == "Echo"
     # Reconnects reuse the certificate.
     assert first["device"] == second["device"]
+
+    context = %{
+      "service" => "s1",
+      "hub" => %{
+        "caller" => %{
+          "key" => pub,
+          "device" => %{"id" => HubServiceEx.Device.id(payload["device"]), "name" => "Mac Studio"},
+          "groups" => ["owners"],
+          "owner" => true
+        },
+        "hubKey" => @hub_key
+      }
+    }
+
+    # The latest hub-side sender is the v1 connection's.
+    hub_sender = last_hub_sender()
+
+    assert {:ok, %{"key" => ^pub, "device" => "Mac Studio", "owner" => true, "hubKey" => @hub_key, "service" => "s1"}} =
+             ChannelEx.send(hub_sender, "echo/caller", nil, context)
+  end
+
+  defp last_hub_sender(sender \\ nil) do
+    receive do
+      {:hub_sender, next} -> last_hub_sender(next)
+    after
+      100 -> sender
+    end
   end
 end

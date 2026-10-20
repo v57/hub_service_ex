@@ -50,8 +50,12 @@ Run the example: `mix run example/echo.exs`
   body and returns the response. `settings` (wire parity, hub-lite ignores): `permissions:
   [group:, name:, allows:]` and `limit:`. If `permissions` is set and `group` is missing, group is
   auto-filled with the first path segment.
-- `stream(path, handler, settings \\ nil)` — streaming endpoint; handler receives the body and
-  returns an enumerable of values.
+- `post(path, fn body, request -> ... end)` — a 2-arity handler also gets the
+  `HubServiceEx.Request`: `caller` (who is calling, from the hub's `context.hub.caller`: `key`,
+  `device_id`, `device_name`, `groups`, `owner`, and `via`/`claimed` through a merged hub; nil on
+  hubs that don't send it), `hub_key` and the whole `context`.
+- `stream(path, handler, settings \\ nil)` — streaming endpoint; handler receives the body (and,
+  with arity 2, the request) and returns an enumerable of values.
 - `app(App)` — append the app header to the hub apps list and serve the AppInterface (all 5 keys:
   `header`/`body`/`top`/`bottom`/`data`) as a stream at the app path. The app path also appears in
   the services list.

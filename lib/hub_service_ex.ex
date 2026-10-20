@@ -206,30 +206,35 @@ defmodule HubServiceEx do
 
   @doc """
   Registers a request/response API endpoint. `handler` receives the request
-  body and returns the response. `settings` (optional) is a keyword list or map
-  with `:permissions` (`group`/`name`/`allows`) and `:limit` (wire parity;
-  hub-lite ignores them).
+  body and returns the response; a 2-arity handler also receives the
+  `HubServiceEx.Request` with the caller identity the hub forwards
+  (`request.caller`) and the whole request context. `settings` (optional) is
+  a keyword list or map with `:permissions` (`group`/`name`/`allows`) and
+  `:limit` (wire parity; hub-lite ignores them).
   """
   def post(%__MODULE__{} = service, path, handler, settings \\ nil)
-      when is_binary(path) and is_function(handler, 1) do
+      when is_binary(path) and (is_function(handler, 1) or is_function(handler, 2)) do
     service = add_path(service, path, settings)
-    channel = ChannelEx.post(service.channel, path, fn request -> handler.(request.body) end)
+    channel = ChannelEx.post(service.channel, path, fn request -> call(handler, request) end)
     %{service | channel: channel}
   end
 
   @doc """
-  Registers a streaming API endpoint. `handler` receives the request body and
-  returns an enumerable of values to emit.
+  Registers a streaming API endpoint. `handler` receives the request body
+  (and, with arity 2, the `HubServiceEx.Request`) and returns an enumerable
+  of values to emit.
   """
   def stream(%__MODULE__{} = service, path, handler, settings \\ nil)
-      when is_binary(path) and is_function(handler, 1) do
+      when is_binary(path) and (is_function(handler, 1) or is_function(handler, 2)) do
     service = add_path(service, path, settings)
 
-    channel =
-      ChannelEx.stream(service.channel, path, fn request -> handler.(request.body) end)
+    channel = ChannelEx.stream(service.channel, path, fn request -> call(handler, request) end)
 
     %{service | channel: channel}
   end
+
+  defp call(handler, request) when is_function(handler, 1), do: handler.(request.body)
+  defp call(handler, request), do: handler.(request.body, HubServiceEx.Request.from(request))
 
   @doc """
   Registers an app: its header is appended to the hub apps list and its path
