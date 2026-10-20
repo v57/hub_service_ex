@@ -45,6 +45,26 @@ defmodule HubServiceEx.FakeHubTest do
     :crypto.verify(:eddsa, :ed25519, data, Base.decode64!(signature), [raw, :ed25519])
   end
 
+  test "starts while the hub is down and connects once it is up", %{tmp: tmp} do
+    {:ok, probe} = :gen_tcp.listen(0, [])
+    {:ok, port} = :inet.port(probe)
+    :gen_tcp.close(probe)
+
+    service =
+      HubServiceEx.new(address: "ws://127.0.0.1:#{port}", device: false, sign: fn -> "key.x.y.1" end)
+      |> HubServiceEx.post("echo", & &1)
+      |> HubServiceEx.start()
+
+    assert_raise RuntimeError, "Service not started", fn -> HubServiceEx.send(service, "echo", 1) end
+
+    test = self()
+    hub = ChannelEx.post(ChannelEx.new(), "hub/service/update", fn _ -> send(test, :late_update) end)
+    listener = ChannelEx.listen(hub, port)
+    on_exit(fn -> ChannelEx.ServerListener.stop(listener) end)
+    assert_receive :late_update, 5_000
+    assert File.ls!(tmp) == []
+  end
+
   test "pins the hub key from hub/info and reconnects with v1", %{tmp: tmp, port: port} do
     address = "ws://127.0.0.1:#{port}"
 

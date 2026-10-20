@@ -302,7 +302,16 @@ defmodule HubServiceEx do
   """
   def start(%__MODULE__{conn: nil} = service) do
     {:ok, conn} = Connection.start_link(service)
-    sender = Connection.sender(conn)
+
+    # The hub may be down or refuse the first connect; the connection keeps
+    # retrying and send/values fetch the current sender anyway.
+    sender =
+      try do
+        Connection.sender(conn)
+      rescue
+        _ -> nil
+      end
+
     %{service | conn: conn, sender: sender}
   end
 
