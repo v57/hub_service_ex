@@ -1,5 +1,5 @@
 defmodule HubServiceEx.FakeHubTest do
-  # End to end against a fake hub: hub/info pinning and the v1 reconnect.
+  # End to end against a fake hub: hub/info pinning, the v1 reconnect and the device header.
   use ExUnit.Case, async: false
 
   alias HubServiceEx.Keychain
@@ -49,7 +49,12 @@ defmodule HubServiceEx.FakeHubTest do
     address = "ws://127.0.0.1:#{port}"
 
     service =
-      HubServiceEx.new(address: address, name: "Echo")
+      HubServiceEx.new(
+        address: address,
+        name: "Echo",
+        device_name: "Mac Studio",
+        device_key_path: Path.join(tmp, "device.key")
+      )
       |> HubServiceEx.post("echo", fn body -> body end)
       |> HubServiceEx.start()
 
@@ -65,5 +70,11 @@ defmodule HubServiceEx.FakeHubTest do
     assert verifies?(pub, "hub1:#{@hub_key}:#{expiry}", sig)
     assert File.read!(Path.join(tmp, "hubs.json")) == ~s({"#{address}":"#{@hub_key}"})
     assert HubServiceEx.hub_key(service) == @hub_key
+
+    payload = HubServiceEx.Device.decode_certificate(second["device"])
+    assert payload["service"] == pub
+    assert payload["instance"] == "Echo"
+    # Reconnects reuse the certificate.
+    assert first["device"] == second["device"]
   end
 end

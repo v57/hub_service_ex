@@ -15,6 +15,12 @@ defmodule HubServiceEx do
   is reported (`last_error/1`), never silently downgraded; call
   `forget_hub_key/1` when the hub key really changed.
 
+  Device mode (protocol.md section 3, on by default): every connect also
+  carries a `device` header, a certificate for the service key signed by the
+  device key (`HubServiceEx.Device`). It is created at connect when missing
+  or with less than 24 hours left (7-day lifetime). A device key that can't
+  be read or created turns device mode off for this service.
+
   Wire parity: `hub/profile/update` and `hub/service/update` payloads are built
   as ordered jiffy objects (tuple-wrapped proplists) so the JSON bytes match the
   TS reference exactly.
@@ -27,10 +33,18 @@ defmodule HubServiceEx do
             profile: nil,
             apps: [],
             paths: MapSet.new(),
+            path_order: [],
             settings: %{},
             sign: nil,
             hub_key: nil,
             pins: nil,
+            device: true,
+            device_key: nil,
+            device_key_path: nil,
+            instance: nil,
+            device_name: nil,
+            platform: nil,
+            parent: nil,
             conn: nil,
             sender: nil
 
@@ -48,6 +62,18 @@ defmodule HubServiceEx do
       the hub key is pinned). A custom fun always connects with `v: "0"`.
     * `:hub_key` — the hub's SPKI if known up front (invitation or config);
       default: learn and pin it via `hub/info`
+    * `:device` — device mode: send a device certificate with every connect
+      (default `true`)
+    * `:device_key` — a caller-provided `HubServiceEx.KeyFile` (e.g. kept in
+      an app's own keychain); default: the device key file
+    * `:device_key_path` — the device key file; default
+      `HubServiceEx.Device.default_key_path/0`
+    * `:instance` — the instance name on this device (`s3-local/Backup Disk`);
+      default: the profile name, else the first segment of the first
+      registered path, else `service`
+    * `:device_name` — the suggested device name; default: the computer name
+    * `:platform` — the certificate platform; default: this OS
+    * `:parent` — the declared parent device name (containers and VMs)
   """
   def new(options \\ []) do
     address = normalize_address(options[:address] || System.get_env("HUB") || 1997)
@@ -65,8 +91,45 @@ defmodule HubServiceEx do
       profile: profile,
       sign: sign,
       hub_key: hub_key,
-      pins: pins
+      pins: pins,
+      device: Keyword.get(options, :device, true),
+      device_key: options[:device_key],
+      device_key_path: options[:device_key_path],
+      instance: options[:instance],
+      device_name: options[:device_name],
+      platform: options[:platform],
+      parent: options[:parent]
     }
+  end
+
+  @doc """
+  The instance name the certificate carries: the `:instance` option, else
+  the profile name, else the first segment of the first registered path,
+  else `service`.
+  """
+  def instance(%__MODULE__{} = service) do
+    profile_name =
+      case service.profile do
+        {fields} -> List.keyfind(fields, "name", 0) |> then(&(&1 && elem(&1, 1)))
+        _ -> nil
+      end
+
+    cond do
+      service.instance not in [nil, ""] -> service.instance
+      profile_name not in [nil, ""] -> profile_name
+      service.path_order != [] -> service.path_order |> List.last() |> String.split("/") |> hd()
+      true -> "service"
+    end
+  end
+
+  @doc """
+  The headers for one connect, as the connection sends them: `auth_headers/2`
+  plus the `device` header (a fresh certificate; the connection reuses its
+  certificate across reconnects until renewal).
+  """
+  def connect_headers(%__MODULE__{} = service) do
+    {device, _cache} = HubServiceEx.Device.header(service, HubServiceEx.Device.new_cache())
+    auth_headers(service, :current, device)
   end
 
   @doc """
@@ -128,14 +191,17 @@ defmodule HubServiceEx do
   The hub-pro headers for one connect with `hub_key`: a fresh token and the
   protocol version, `"1"` with a token bound to the hub key, else `"0"`.
   """
-  def auth_headers(%__MODULE__{} = service, hub_key \\ :current) do
+  def auth_headers(%__MODULE__{} = service, hub_key \\ :current, device \\ nil) do
     hub_key = if hub_key == :current, do: service.hub_key, else: hub_key
 
-    cond do
-      service.sign -> %{"auth" => service.sign.(), "v" => "0"}
-      hub_key -> %{"auth" => HubServiceEx.Keychain.sign_hub(hub_key), "v" => "1"}
-      true -> %{"auth" => HubServiceEx.Keychain.sign(), "v" => "0"}
-    end
+    headers =
+      cond do
+        service.sign -> %{"auth" => service.sign.(), "v" => "0"}
+        hub_key -> %{"auth" => HubServiceEx.Keychain.sign_hub(hub_key), "v" => "1"}
+        true -> %{"auth" => HubServiceEx.Keychain.sign(), "v" => "0"}
+      end
+
+    if device, do: Map.put(headers, "device", device), else: headers
   end
 
   @doc """
@@ -275,7 +341,7 @@ defmodule HubServiceEx do
   end
 
   defp add_path(%__MODULE__{} = service, path, nil) do
-    %{service | paths: MapSet.put(service.paths, path)}
+    %{service | paths: MapSet.put(service.paths, path), path_order: remember_path(service, path)}
   end
 
   defp add_path(%__MODULE__{} = service, path, settings)
@@ -283,8 +349,14 @@ defmodule HubServiceEx do
     %{
       service
       | paths: MapSet.put(service.paths, path),
+        path_order: remember_path(service, path),
         settings: Map.put(service.settings, path, normalize_settings(settings, path))
     }
+  end
+
+  # Registration order, newest first (the instance defaults to the oldest).
+  defp remember_path(service, path) do
+    if path in service.path_order, do: service.path_order, else: [path | service.path_order]
   end
 
   defp normalize_settings(settings, path) do

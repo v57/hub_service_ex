@@ -40,6 +40,12 @@ Run the example: `mix run example/echo.exs`
   `hubs.json` beside the key file and reconnects with `v: "1"` (`:hub_key` supplies it up front,
   `forget_hub_key/1` clears the pin, `last_error/1` reports a refused connect).
   `Keychain.sign/0` / `Keychain.sign_hub/1` make the tokens.
+- Device mode (on by default): every connect also sends a `device` header, a 7-day certificate for
+  the service key signed by the device key (`~/.hub/device.key`, `$HUB_DEVICE_KEY` or
+  `:device_key_path`, created 0600; `:device_key` for a `KeyFile` kept elsewhere), renewed at
+  connect with less than a day left. `:instance` names the service on its device (default: profile
+  name, else first path segment, else `service`); `:device_name`, `:platform`, `:parent` override
+  the suggestions; `device: false` turns it off.
 - `post(path, handler, settings \\ nil)` — request/response endpoint; handler receives the request
   body and returns the response. `settings` (wire parity, hub-lite ignores): `permissions:
   [group:, name:, allows:]` and `limit:`. If `permissions` is set and `group` is missing, group is

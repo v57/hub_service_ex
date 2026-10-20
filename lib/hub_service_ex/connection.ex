@@ -49,7 +49,8 @@ defmodule HubServiceEx.Connection do
       sender: nil,
       mon: nil,
       retry: nil,
-      last_error: nil
+      last_error: nil,
+      device: HubServiceEx.Device.new_cache()
     }
 
     {:ok, state, {:continue, :connect}}
@@ -162,7 +163,9 @@ defmodule HubServiceEx.Connection do
   defp connect(%{service: service, retry: retry} = state) do
     if retry, do: Process.cancel_timer(retry)
     owner = self()
-    headers = HubServiceEx.auth_headers(service, state.hub_key)
+    {device, device_cache} = HubServiceEx.Device.header(service, state.device)
+    state = %{state | device: device_cache}
+    headers = HubServiceEx.auth_headers(service, state.hub_key, device)
 
     on_connect =
       if service.pins == nil or state.hub_key != nil do
