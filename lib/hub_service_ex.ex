@@ -4,8 +4,16 @@ defmodule HubServiceEx do
 
   Lets an Elixir process connect to a hub (hub-lite/hub-pro), host post/stream
   API endpoints, and call API through the hub. Every connection carries
-  hub-pro auth headers (a freshly signed keychain token + `v: "0"`); hub-lite
+  hub-pro auth headers (a freshly signed keychain token + `v`); hub-lite
   ignores them (regression-safe).
+
+  Hub-bound auth (`Docs/Devices/protocol.md` section 2): with no pinned key
+  for the address, the service connects with `v: "0"`, calls `hub/info`, pins
+  the returned key in `hubs.json` beside the key file and reconnects at once
+  with `v: "1"` tokens signed over `hub1:<hub key>:<expiry>`. A hub that
+  doesn't answer `hub/info` (hub-lite) keeps getting v0. A refused v1 connect
+  is reported (`last_error/1`), never silently downgraded; call
+  `forget_hub_key/1` when the hub key really changed.
 
   Wire parity: `hub/profile/update` and `hub/service/update` payloads are built
   as ordered jiffy objects (tuple-wrapped proplists) so the JSON bytes match the
@@ -21,6 +29,8 @@ defmodule HubServiceEx do
             paths: MapSet.new(),
             settings: %{},
             sign: nil,
+            hub_key: nil,
+            pins: nil,
             conn: nil,
             sender: nil
 
@@ -33,19 +43,99 @@ defmodule HubServiceEx do
     * `:address` — port integer or `ws://` URL (default: `1997` or `$HUB`)
     * `:name` — profile name shown in the hub
     * `:icon` — profile icon: a string or `%{symbol: ..., text: ...}`
-    * `:sign` — 0-arity fun returning a fresh hub-pro auth token
-      (default: `HubServiceEx.Keychain.sign/0` — the `auth` key file in the
-      cwd, TS parity)
+    * `:sign` — 0-arity fun returning a fresh hub-pro auth token (default:
+      the keychain — the `auth` key file in the cwd — signing v1 tokens once
+      the hub key is pinned). A custom fun always connects with `v: "0"`.
+    * `:hub_key` — the hub's SPKI if known up front (invitation or config);
+      default: learn and pin it via `hub/info`
   """
   def new(options \\ []) do
     address = normalize_address(options[:address] || System.get_env("HUB") || 1997)
     name = options[:name]
     icon = options[:icon]
-    sign = options[:sign] || (&HubServiceEx.Keychain.sign/0)
+    sign = options[:sign]
+    pins = if sign, do: nil, else: HubServiceEx.HubPins.beside(HubServiceEx.Keychain.key_path())
+    hub_key = options[:hub_key] || (pins && HubServiceEx.HubPins.get(pins, normalize_hub_address(address)))
 
     profile = if name || icon, do: build_profile(name, icon), else: nil
 
-    %__MODULE__{channel: ChannelEx.new(), address: address, profile: profile, sign: sign}
+    %__MODULE__{
+      channel: ChannelEx.new(),
+      address: address,
+      profile: profile,
+      sign: sign,
+      hub_key: hub_key,
+      pins: pins
+    }
+  end
+
+  @doc """
+  The hub key v1 tokens are bound to, or nil while connecting with v0. Once
+  started, this is the connection's current key.
+  """
+  def hub_key(%__MODULE__{conn: nil, hub_key: hub_key}), do: hub_key
+  def hub_key(%__MODULE__{conn: conn}), do: Connection.hub_key(conn)
+
+  @doc "The last connect error (e.g. a refused v1 connect), or nil."
+  def last_error(%__MODULE__{conn: nil}), do: nil
+  def last_error(%__MODULE__{conn: conn}), do: Connection.last_error(conn)
+
+  @doc """
+  Clears the pinned hub key for this address, so the next connect uses v0
+  and pins whatever key `hub/info` returns. Use it when a hub's key changed
+  on purpose. Returns the updated service.
+  """
+  def forget_hub_key(%__MODULE__{} = service) do
+    if service.pins, do: HubServiceEx.HubPins.remove(service.pins, address_key(service))
+    if service.conn, do: Connection.forget_hub_key(service.conn)
+    %{service | hub_key: nil}
+  end
+
+  @doc "The address as `hubs.json` keys it (`normalize_hub_address/1`)."
+  def address_key(%__MODULE__{address: address}), do: normalize_hub_address(address)
+
+  @doc """
+  Normalizes a hub address like channel TS does (protocol.md section 2): a
+  bare port becomes `ws://localhost:<port>`; a URL keeps its form with the
+  scheme and host lowercased and no trailing slash.
+  """
+  def normalize_hub_address(port) when is_integer(port), do: "ws://localhost:#{port}"
+
+  def normalize_hub_address(address) when is_binary(address) do
+    text = String.trim(address)
+
+    cond do
+      text =~ ~r/^\d+$/ ->
+        "ws://localhost:#{text}"
+
+      String.contains?(text, "://") ->
+        [scheme, rest] = String.split(text, "://", parts: 2)
+
+        {authority, path} =
+          case String.split(rest, "/", parts: 2) do
+            [authority, path] -> {authority, "/" <> path}
+            [authority] -> {authority, ""}
+          end
+
+        String.trim_trailing(String.downcase(scheme) <> "://" <> String.downcase(authority) <> path, "/")
+
+      true ->
+        String.trim_trailing(text, "/")
+    end
+  end
+
+  @doc """
+  The hub-pro headers for one connect with `hub_key`: a fresh token and the
+  protocol version, `"1"` with a token bound to the hub key, else `"0"`.
+  """
+  def auth_headers(%__MODULE__{} = service, hub_key \\ :current) do
+    hub_key = if hub_key == :current, do: service.hub_key, else: hub_key
+
+    cond do
+      service.sign -> %{"auth" => service.sign.(), "v" => "0"}
+      hub_key -> %{"auth" => HubServiceEx.Keychain.sign_hub(hub_key), "v" => "1"}
+      true -> %{"auth" => HubServiceEx.Keychain.sign(), "v" => "0"}
+    end
   end
 
   @doc """

@@ -3,7 +3,9 @@
 Elixir port of the [hub-service](https://github.com/v57/hub-service) library: connect to a hub
 (hub-lite/hub-pro), host post/stream API endpoints, and call API through the hub.
 
-Lite port — **no auth, no keychain, no crypto**. Wire parity with the TS reference:
+Hub-pro auth is supported: every (re)connect sends `auth` + `v` headers signed by the ed25519
+keychain (`auth` key file in the cwd, or `$HUBKEY`), bound to the hub's key once it is pinned
+(`v: "1"`). hub-lite ignores the headers. Wire parity with the TS reference:
 `hub/profile/update` and `hub/service/update` payloads are built as ordered jiffy objects so the
 JSON bytes match the TS/Go ports exactly.
 
@@ -33,7 +35,11 @@ Run the example: `mix run example/echo.exs`
 ## API
 
 - `new(options \\ [])` — options: `:address` (port int or `ws://` string; default `1997` or `$HUB`),
-  `:name`, `:icon` (string or `%{symbol: ..., text: ...}`).
+  `:name`, `:icon` (string or `%{symbol: ..., text: ...}`), `:sign`, `:hub_key`.
+- Hub-bound auth: the first connect uses `v: "0"`, asks `hub/info` for the hub key, pins it in
+  `hubs.json` beside the key file and reconnects with `v: "1"` (`:hub_key` supplies it up front,
+  `forget_hub_key/1` clears the pin, `last_error/1` reports a refused connect).
+  `Keychain.sign/0` / `Keychain.sign_hub/1` make the tokens.
 - `post(path, handler, settings \\ nil)` — request/response endpoint; handler receives the request
   body and returns the response. `settings` (wire parity, hub-lite ignores): `permissions:
   [group:, name:, allows:]` and `limit:`. If `permissions` is set and `group` is missing, group is

@@ -38,7 +38,7 @@ defmodule HubServiceEx.KeychainTest do
     # expiry is a decimal epoch-seconds string (TS parity; hub-pro rejects
     # it once expired or if over 5 minutes ahead)
     assert {expiry_epoch, ""} = Integer.parse(expiry)
-    assert_in_delta expiry_epoch, System.system_time(:second) + 10, 2
+    assert_in_delta expiry_epoch, System.system_time(:second) + 60, 2
 
     # signature is 64-byte ed25519 over the expiry string, verifiable with
     # the raw public key embedded in the SPKI DER (bytes 48..92 -> raw pub)

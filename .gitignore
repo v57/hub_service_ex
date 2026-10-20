@@ -7,13 +7,15 @@ erl_crash.dump
 *.ez
 hub_service_ex-*.tar
 /auth
+/hubs.json
 CLAUDE.md
 /.claude
 
 # macOS
 .DS_Store
 # Finder folder icon: a file named Icon plus a carriage return
-Icon[]
+Icon[
+]
 
 # Secrets
 .env

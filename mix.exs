@@ -19,7 +19,8 @@ defmodule HubServiceEx.MixProject do
 
   defp deps do
     [
-      {:channel_ex, path: "../../Channel/channel_ex"}
+      {:channel_ex, path: "../../Channel/channel_ex"},
+      {:jason, "~> 1.4"}
     ]
   end
 end
