@@ -6,7 +6,7 @@ defmodule HubServiceEx.Connection do
   # socket's on_connect callback fires `HubServiceEx.send_updates/2`, which
   # re-sends hub/profile/update + hub/service/update (hub-lite drops a
   # sender's services on disconnect). Every (re)connect also carries fresh
-  # hub-pro auth headers ({auth: <signed token>, v}) — the headers map is
+  # hub-server auth headers ({auth: <signed token>, v}) — the headers map is
   # built here once per dial, so the token is always freshly signed (TS
   # reference parity). hub-lite ignores the headers.
   #
@@ -294,7 +294,7 @@ defmodule HubServiceEx.Connection do
   defp report_error(state, headers, reason) do
     message = if is_exception(reason), do: Exception.message(reason), else: inspect(reason)
 
-    # hub-pro refuses a bad token with HTTP 401 (a failed handshake here); its reason (invalid
+    # hub-server refuses a bad token with HTTP 401 (a failed handshake here); its reason (invalid
     # signature, key revoked) stays on the hub.
     if headers["v"] == "1" and match?({:handshake_failed, _}, reason) and message != state.last_error do
       IO.puts(

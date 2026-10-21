@@ -2,7 +2,7 @@ defmodule HubServiceEx.Keychain do
   @moduledoc """
   ed25519 keychain: load-or-generate the `auth` key file and sign tokens.
 
-  Hub-pro auth parity with the TS reference (hub-service/keychain.ts) and
+  hub-server auth parity with the TS reference (hub-service/keychain.ts) and
   `Docs/Devices/protocol.md` section 2:
 
   - The key file (`auth` in the working directory, or `$HUBKEY`) is the
@@ -14,7 +14,7 @@ defmodule HubServiceEx.Keychain do
       expiry  = DECIMAL epoch-seconds string of now + 60
       sig     = base64 ed25519 signature over `<expiry>` (header `v: 0`) or
                 over `hub1:<hub SPKI>:<expiry>` (header `v: 1`, bound to one
-                hub). hub-pro allows 30 s of clock skew and at most 300 s
+                hub). hub-server allows 30 s of clock skew and at most 300 s
                 ahead.
   - The hub verifies the signature against the embedded public key and
     treats the key as the connection identity (owner/host/group).

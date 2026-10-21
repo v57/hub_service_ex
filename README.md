@@ -1,9 +1,9 @@
 # hub_service_ex
 
 Elixir port of the [hub-service](https://github.com/v57/hub-service) library: connect to a hub
-(hub-lite/hub-pro), host post/stream API endpoints, and call API through the hub.
+(hub-lite/hub-server), host post/stream API endpoints, and call API through the hub.
 
-Hub-pro auth is supported: every (re)connect sends `auth` + `v` headers signed by the ed25519
+hub-server auth is supported: every (re)connect sends `auth` + `v` headers signed by the ed25519
 keychain (`auth` key file in the cwd, or `$HUBKEY`), bound to the hub's key once it is pinned
 (`v: "1"`). hub-lite ignores the headers. Wire parity with the TS reference:
 `hub/profile/update` and `hub/service/update` payloads are built as ordered jiffy objects so the

@@ -35,7 +35,7 @@ defmodule HubServiceEx.KeychainTest do
     assert ["key", pub, sig, expiry] = String.split(token, ".")
     assert pub == @ts_pub
 
-    # expiry is a decimal epoch-seconds string (TS parity; hub-pro rejects
+    # expiry is a decimal epoch-seconds string (TS parity; hub-server rejects
     # it once expired or if over 5 minutes ahead)
     assert {expiry_epoch, ""} = Integer.parse(expiry)
     assert_in_delta expiry_epoch, System.system_time(:second) + 60, 2

@@ -2,9 +2,9 @@ defmodule HubServiceEx do
   @moduledoc """
   HubServiceEx — Elixir port of the hub-service library (TS reference).
 
-  Lets an Elixir process connect to a hub (hub-lite/hub-pro), host post/stream
+  Lets an Elixir process connect to a hub (hub-lite/hub-server), host post/stream
   API endpoints, and call API through the hub. Every connection carries
-  hub-pro auth headers (a freshly signed keychain token + `v`); hub-lite
+  hub-server auth headers (a freshly signed keychain token + `v`); hub-lite
   ignores them (regression-safe).
 
   Hub-bound auth (`Docs/Devices/protocol.md` section 2): with no pinned key
@@ -59,7 +59,7 @@ defmodule HubServiceEx do
     * `:address` — port integer or `ws://` URL (default: `1997` or `$HUB`)
     * `:name` — profile name shown in the hub
     * `:icon` — profile icon: a string or `%{symbol: ..., text: ...}`
-    * `:sign` — 0-arity fun returning a fresh hub-pro auth token (default:
+    * `:sign` — 0-arity fun returning a fresh hub-server auth token (default:
       the keychain — the `auth` key file in the cwd — signing v1 tokens once
       the hub key is pinned). A custom fun always connects with `v: "0"`.
     * `:hub_key` — the hub's SPKI if known up front (invitation or config);
@@ -237,7 +237,7 @@ defmodule HubServiceEx do
   end
 
   @doc """
-  The hub-pro headers for one connect with `hub_key`: a fresh token and the
+  The hub-server headers for one connect with `hub_key`: a fresh token and the
   protocol version, `"1"` with a token bound to the hub key, else `"0"`.
   """
   def auth_headers(%__MODULE__{} = service, hub_key \\ :current, device \\ nil) do
