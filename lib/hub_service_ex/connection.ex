@@ -15,6 +15,10 @@ defmodule HubServiceEx.Connection do
   # the socket's own callback would wait on itself). A key from it is pinned
   # and the connection re-dialed at once with a v1 token; an error (hub-lite)
   # keeps v0 and sends the updates.
+  #
+  # Hub Network shares live here too: declared ones are republished from a
+  # task after every connect, and publish/update/remove calls attest and
+  # replace the whole set through the current sender.
 
   use GenServer
 
@@ -37,6 +41,10 @@ defmodule HubServiceEx.Connection do
   def hub_key(pid), do: GenServer.call(pid, :hub_key)
   def last_error(pid), do: GenServer.call(pid, :last_error)
   def forget_hub_key(pid), do: GenServer.call(pid, :forget_hub_key)
+  def publish(pid, share), do: GenServer.call(pid, {:publish, share}, 60_000)
+  def update_share(pid, name, changes), do: GenServer.call(pid, {:update_share, name, changes}, 60_000)
+  def remove_share(pid, name), do: GenServer.call(pid, {:remove_share, name}, 60_000)
+  def publications(pid), do: GenServer.call(pid, :publications)
 
   @impl true
   def init(service) do
@@ -51,7 +59,9 @@ defmodule HubServiceEx.Connection do
       mon: nil,
       retry: nil,
       last_error: nil,
-      device: HubServiceEx.Device.new_cache()
+      device: HubServiceEx.Device.new_cache(),
+      shares: service.shares,
+      publications: %{}
     }
 
     {:ok, state, {:continue, :connect}}
@@ -73,6 +83,32 @@ defmodule HubServiceEx.Connection do
 
   def handle_call(:hub_key, _from, state), do: {:reply, state.hub_key, state}
   def handle_call(:last_error, _from, state), do: {:reply, state.last_error, state}
+  def handle_call(:publications, _from, state), do: {:reply, publication_list(state.publications), state}
+
+  def handle_call({:publish, share}, _from, state) do
+    replace_shares(state, Map.put(state.shares, share.name, share))
+  end
+
+  def handle_call({:update_share, name, changes}, _from, state) do
+    case Map.fetch(state.shares, name) do
+      {:ok, share} ->
+        share = %{share | policy: changes[:policy] || share.policy, port: changes[:port] || share.port}
+        HubServiceEx.Network.validate!(share)
+        replace_shares(state, Map.put(state.shares, name, share))
+
+      :error ->
+        {:reply, {:error, "Share '#{name}' not found"}, state}
+    end
+  end
+
+  def handle_call({:remove_share, name}, _from, state) do
+    if Map.has_key?(state.shares, name) do
+      replace_shares(state, Map.delete(state.shares, name))
+    else
+      {:reply, {:error, "Share '#{name}' not found"}, state}
+    end
+  end
+
   def handle_call(:forget_hub_key, _from, state) do
     HubServiceEx.put_current_hub_key(state.service, nil)
     {:reply, :ok, %{state | hub_key: nil}}
@@ -88,7 +124,7 @@ defmodule HubServiceEx.Connection do
 
       state.service.pins == nil or state.hub_key != nil ->
         HubServiceEx.send_updates(state.service, sender)
-        {:noreply, state}
+        {:noreply, republish(state, client_ws, sender)}
 
       true ->
         owner = self()
@@ -122,6 +158,17 @@ defmodule HubServiceEx.Connection do
       true ->
         # hub-lite or an older hub-pro: stay on v0.
         HubServiceEx.send_updates(state.service, sender)
+        {:noreply, republish(state, client_ws, sender)}
+    end
+  end
+
+  def handle_info({:republished, client_ws, result}, state) do
+    case result do
+      {:ok, publications} when is_map(publications) ->
+        if current?(state, client_ws), do: {:noreply, %{state | publications: publications}}, else: {:noreply, state}
+
+      {:error, message} ->
+        IO.puts(:stderr, "hub-service: failed to republish network shares: #{message}")
         {:noreply, state}
     end
   end
@@ -144,6 +191,52 @@ defmodule HubServiceEx.Connection do
 
   def handle_info(_message, state) do
     {:noreply, state}
+  end
+
+  # Attests and replaces the whole share set; keeps the old set on failure.
+  defp replace_shares(state, shares) do
+    cond do
+      state.sender == nil ->
+        {:reply, {:error, "Service not started"}, state}
+
+      state.service.sign != nil ->
+        {:reply, {:error, "Share publication needs the keychain service key, not a custom sign"}, state}
+
+      true ->
+        case run_synchronize(state, shares, state.sender) do
+          {:ok, publications} ->
+            {:reply, {:ok, publication_list(publications)}, %{state | shares: shares, publications: publications}}
+
+          {:error, _} = error ->
+            {:reply, error, state}
+        end
+    end
+  end
+
+  # Republishes the declared shares after a connect, from a task: the calls
+  # need this process free to answer.
+  defp republish(%{shares: shares} = state, client_ws, sender) when map_size(shares) > 0 do
+    if state.service.sign == nil do
+      owner = self()
+      Task.start(fn -> send(owner, {:republished, client_ws, run_synchronize(state, shares, sender)}) end)
+    end
+
+    state
+  end
+
+  defp republish(state, _client_ws, _sender), do: state
+
+  defp run_synchronize(state, shares, sender) do
+    socket = state.service.agent_socket || HubServiceEx.Network.default_agent_socket()
+    send_fun = fn body -> ChannelEx.send(sender, "network/shares/replace", body, nil, 10_000) end
+    HubServiceEx.Network.synchronize!(shares, HubServiceEx.Keychain.key(), socket, send_fun)
+  rescue
+    error in HubServiceEx.Network.AgentError -> {:error, {error.code, error.message}}
+    error -> {:error, Exception.message(error)}
+  end
+
+  defp publication_list(publications) do
+    publications |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(&elem(&1, 1))
   end
 
   defp hub_info_key({:ok, %{"key" => key}}) when is_binary(key), do: key

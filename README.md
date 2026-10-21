@@ -57,6 +57,13 @@ Run the example: `mix run example/echo.exs`
   `hub_key` and the whole `context`.
 - `stream(path, handler, settings \\ nil)` — streaming endpoint; handler receives the body (and,
   with arity 2, the request) and returns an enumerable of values.
+- Hub Network shares (TS `publishShare` parity): `share(name, protocol, host, port, policy \\ nil)`
+  declares one before `start()` (republished on every connect); `publish_share/6`,
+  `update_share(service, name, policy:, port:)` and `remove_share/2` change the set at runtime and
+  return `{:ok, publications} | {:error, reason}`. The local hub-net agent attests each share over
+  its Unix socket (`$HUB_NET_AGENT_SOCKET`, else `/var/run/hub-net/agent.sock` on macOS,
+  `/run/hub-net/agent.sock` on Linux; `:agent_socket` overrides it), then the set goes to the hub
+  with `network/shares/replace`. `publications/1` lists the results.
 - `app(App)` — append the app header to the hub apps list and serve the AppInterface (all 5 keys:
   `header`/`body`/`top`/`bottom`/`data`) as a stream at the app path. The app path also appears in
   the services list.

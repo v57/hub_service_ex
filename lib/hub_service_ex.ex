@@ -45,6 +45,8 @@ defmodule HubServiceEx do
             device_name: nil,
             platform: nil,
             parent: nil,
+            shares: %{},
+            agent_socket: nil,
             conn: nil,
             sender: nil
 
@@ -74,6 +76,8 @@ defmodule HubServiceEx do
     * `:device_name` — the suggested device name; default: the computer name
     * `:platform` — the certificate platform; default: this OS
     * `:parent` — the declared parent device name (containers and VMs)
+    * `:agent_socket` — the hub-net agent socket for share publication;
+      default `HubServiceEx.Network.default_agent_socket/0`
   """
   def new(options \\ []) do
     address = normalize_address(options[:address] || System.get_env("HUB") || 1997)
@@ -99,9 +103,46 @@ defmodule HubServiceEx do
       instance: options[:instance],
       device_name: options[:device_name],
       platform: options[:platform],
-      parent: options[:parent]
+      parent: options[:parent],
+      agent_socket: options[:agent_socket]
     }
   end
+
+  @doc """
+  Declares a Hub Network share before `start/1`: the local `host:port` is
+  published under `name` on connect and after every reconnect (see
+  `HubServiceEx.Network`; a nil policy means private).
+  """
+  def share(%__MODULE__{} = service, name, protocol, host, port, policy \\ nil) do
+    share = HubServiceEx.Network.share(name, protocol, host, port, policy)
+    %{service | shares: Map.put(service.shares, name, share)}
+  end
+
+  @doc """
+  Publishes a Hub Network share now (TS `publishShare`): the local hub-net
+  agent attests the port, then the declared set goes to the hub. Returns
+  `{:ok, publications}` (every current publication, in share-name order) or
+  `{:error, reason}`. Requires `start/1`.
+  """
+  def publish_share(service, name, protocol, host, port, policy \\ nil)
+
+  def publish_share(%__MODULE__{conn: nil}, _name, _protocol, _host, _port, _policy), do: raise("Service not started")
+
+  def publish_share(%__MODULE__{conn: conn}, name, protocol, host, port, policy) do
+    Connection.publish(conn, HubServiceEx.Network.share(name, protocol, host, port, policy))
+  end
+
+  @doc "Changes a published share's `:policy` and/or `:port` and republishes."
+  def update_share(%__MODULE__{conn: nil}, _name, _changes), do: raise("Service not started")
+  def update_share(%__MODULE__{conn: conn}, name, changes), do: Connection.update_share(conn, name, changes)
+
+  @doc "Removes a share and republishes the rest."
+  def remove_share(%__MODULE__{conn: nil}, _name), do: raise("Service not started")
+  def remove_share(%__MODULE__{conn: conn}, name), do: Connection.remove_share(conn, name)
+
+  @doc "The current share publications, in share-name order."
+  def publications(%__MODULE__{conn: nil}), do: []
+  def publications(%__MODULE__{conn: conn}), do: Connection.publications(conn)
 
   @doc """
   The instance name the certificate carries: the `:instance` option, else
