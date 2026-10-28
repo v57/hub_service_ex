@@ -1,4 +1,9 @@
 #!/bin/sh
 set -e
+# In the Hub checkout this runs in its toolchain container (HubTools/hub-run); elsewhere it runs here.
+hub_run="$(dirname "$0")/../../../HubTools/hub-run"
+[ -n "${HUB_TOOLCHAIN:-}" ] || [ ! -x "$hub_run" ] || exec "$hub_run" sh "$0" "$@"
+
 cd "$(dirname "$0")/.."
+mix deps.get >/dev/null
 mix test
