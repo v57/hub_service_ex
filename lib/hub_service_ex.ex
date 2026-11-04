@@ -2,18 +2,20 @@ defmodule HubServiceEx do
   @moduledoc """
   HubServiceEx — Elixir port of the hub-service library (TS reference).
 
-  Lets an Elixir process connect to a hub (hub-lite/hub-server), host post/stream
+  Lets an Elixir process connect to a hub (hub-server), host post/stream
   API endpoints, and call API through the hub. Every connection carries
-  hub-server auth headers (a freshly signed keychain token + `v`); hub-lite
-  ignores them (regression-safe).
+  hub-server auth headers (a freshly signed keychain token + `v`).
 
-  Hub-bound auth (`Docs/Devices/protocol.md` section 2): with no pinned key
-  for the address, the service connects with `v: "0"`, calls `hub/info`, pins
-  the returned key in `hubs.json` beside the key file and reconnects at once
-  with `v: "1"` tokens signed over `hub1:<hub key>:<expiry>`. A hub that
-  doesn't answer `hub/info` (hub-lite) keeps getting v0. A refused v1 connect
-  is reported (`last_error/1`), never silently downgraded; call
-  `forget_hub_key/1` when the hub key really changed.
+  Auth v2 (`Docs/Devices/protocol.md` section 2): before every connect the service
+  asks `hub/info` on a short anonymous connection with a fresh nonce. Only an
+  answer with a valid proof of the key it claims gets a token, over that answer's
+  challenge; the first proven key is pinned in `hubs.json` beside the key file. A
+  hub that doesn't prove its key, or answers with another than the pinned one, gets
+  nothing and is reported (`last_error/1`) while the service keeps trying with a
+  growing delay, and calls wait up to their timeout. Call `forget_hub_key/1` when
+  the hub key really changed. Plain `ws://` beyond loopback, the overlay and the
+  LAN isn't dialed unless `:allow_plaintext` says so. channel_ex has no TLS, so
+  `wss://` isn't dialed either.
 
   Device mode (protocol.md section 3, on by default): every connect also
   carries a `device` header, a certificate for the service key signed by the
@@ -28,6 +30,8 @@ defmodule HubServiceEx do
 
   alias HubServiceEx.Connection
 
+  @auth_version "1"
+
   defstruct channel: nil,
             address: 1997,
             profile: nil,
@@ -36,6 +40,8 @@ defmodule HubServiceEx do
             settings: %{},
             sign: nil,
             hub_key: nil,
+            allow_plaintext: false,
+            refusal: nil,
             key_ref: nil,
             pins: nil,
             device: true,
@@ -59,11 +65,15 @@ defmodule HubServiceEx do
     * `:address` — port integer or `ws://` URL (default: `1997` or `$HUB`)
     * `:name` — profile name shown in the hub
     * `:icon` — profile icon: a string or `%{symbol: ..., text: ...}`
-    * `:sign` — 0-arity fun returning a fresh hub-server auth token (default:
-      the keychain — the `auth` key file in the cwd — signing v1 tokens once
-      the hub key is pinned). A custom fun always connects with `v: "0"`.
+    * `:sign` — fun of the key the hub proved and the challenge of this connect,
+      returning a fresh hub-server auth token (default: the keychain — the `auth`
+      key file in the cwd)
     * `:hub_key` — the hub's SPKI if known up front (invitation or config);
-      default: learn and pin it via `hub/info`
+      default: pin the first key a hub proves
+    * `:allow_plaintext` — dial plain `ws://` beyond loopback, the overlay and the
+      LAN, which would carry the service's key unencrypted: for private networks
+      the SDK can't recognize, such as a container's `ws://hub:1997`. Also
+      `HUB_ALLOW_PLAINTEXT=1`
     * `:device` — device mode: send a device certificate with every connect
       (default `true`)
     * `:device_key` — a caller-provided `HubServiceEx.KeyFile` (e.g. kept in
@@ -84,8 +94,8 @@ defmodule HubServiceEx do
     name = options[:name]
     icon = options[:icon]
     sign = options[:sign]
-    pins = if sign, do: nil, else: HubServiceEx.HubPins.beside(HubServiceEx.Keychain.key_path())
-    hub_key = options[:hub_key] || (pins && HubServiceEx.HubPins.get(pins, normalize_hub_address(address)))
+    pins = HubServiceEx.HubPins.beside(HubServiceEx.Keychain.key_path())
+    hub_key = options[:hub_key] || HubServiceEx.HubPins.get(pins, normalize_hub_address(address))
 
     profile = if name || icon, do: build_profile(name, icon), else: nil
 
@@ -95,6 +105,7 @@ defmodule HubServiceEx do
       profile: profile,
       sign: sign,
       hub_key: hub_key,
+      allow_plaintext: options[:allow_plaintext] == true or System.get_env("HUB_ALLOW_PLAINTEXT") == "1",
       key_ref: make_ref(),
       pins: pins,
       device: Keyword.get(options, :device, true),
@@ -164,17 +175,18 @@ defmodule HubServiceEx do
   end
 
   @doc """
-  The headers for one connect, as the connection sends them: `auth_headers/2`
-  plus the `device` header (a fresh certificate; the connection reuses its
-  certificate across reconnects until renewal).
+  The headers for one connect to a hub that proved `hub_key` and answered
+  `challenge`, as the connection sends them: `auth_headers/4` with the `device`
+  header (a fresh certificate; the connection reuses its certificate across
+  reconnects until renewal).
   """
-  def connect_headers(%__MODULE__{} = service) do
+  def connect_headers(%__MODULE__{} = service, hub_key, challenge) do
     {device, _cache} = HubServiceEx.Device.header(service, HubServiceEx.Device.new_cache())
-    auth_headers(service, :current, device)
+    auth_headers(service, hub_key, challenge, device)
   end
 
   @doc """
-  The hub key v1 tokens are bound to, or nil while connecting with v0. Once
+  The hub key this address is pinned to, or nil until a hub proved one. Once
   started, this is the connection's current key.
   """
   def hub_key(%__MODULE__{conn: nil, hub_key: hub_key}), do: hub_key
@@ -187,17 +199,17 @@ defmodule HubServiceEx do
 
   defp current_hub_key(ref, fallback), do: :persistent_term.get({__MODULE__, :hub_key, ref}, fallback)
 
-  @doc "The last connect error (e.g. a refused v1 connect), or nil."
+  @doc "The last connect error (a hub that didn't prove its key, a refused connect), or nil."
   def last_error(%__MODULE__{conn: nil}), do: nil
   def last_error(%__MODULE__{conn: conn}), do: Connection.last_error(conn)
 
   @doc """
-  Clears the pinned hub key for this address, so the next connect uses v0
-  and pins whatever key `hub/info` returns. Use it when a hub's key changed
-  on purpose. Returns the updated service.
+  Clears the pinned hub key for this address, so the next connect pins what the
+  hub proves. Use it when a hub's key changed on purpose. Returns the updated
+  service.
   """
   def forget_hub_key(%__MODULE__{} = service) do
-    if service.pins, do: HubServiceEx.HubPins.remove(service.pins, address_key(service))
+    HubServiceEx.HubPins.remove(service.pins, address_key(service))
     if service.conn, do: Connection.forget_hub_key(service.conn)
     put_current_hub_key(service, nil)
     %{service | hub_key: nil}
@@ -237,21 +249,23 @@ defmodule HubServiceEx do
   end
 
   @doc """
-  The hub-server headers for one connect with `hub_key`: a fresh token and the
-  protocol version, `"1"` with a token bound to the hub key, else `"0"`.
+  The hub-server headers for one connect to the hub that proved `hub_key`: a token
+  over `challenge` and the protocol version.
   """
-  def auth_headers(%__MODULE__{} = service, hub_key \\ :current, device \\ nil) do
-    hub_key = if hub_key == :current, do: service.hub_key, else: hub_key
-
-    headers =
-      cond do
-        service.sign -> %{"auth" => service.sign.(), "v" => "0"}
-        hub_key -> %{"auth" => HubServiceEx.Keychain.sign_hub(hub_key), "v" => "1"}
-        true -> %{"auth" => HubServiceEx.Keychain.sign(), "v" => "0"}
+  def auth_headers(%__MODULE__{} = service, hub_key, challenge, device \\ nil) do
+    token =
+      if service.sign do
+        service.sign.(hub_key, challenge)
+      else
+        HubServiceEx.Keychain.sign_hub(hub_key, challenge)
       end
 
+    headers = %{"auth" => token, "v" => @auth_version}
     if device, do: Map.put(headers, "device", device), else: headers
   end
+
+  @doc "How the address travels (`HubServiceEx.HubProof.transport_of/1`)."
+  def transport(%__MODULE__{address: address}), do: HubServiceEx.HubProof.transport_of(address)
 
   @doc """
   Registers a request/response API endpoint. `handler` receives the request
@@ -308,28 +322,30 @@ defmodule HubServiceEx do
   end
 
   @doc """
-  Calls an API through the hub. Raises if the service has not been started.
-  Returns `{:ok, response}` or `{:error, reason}`.
+  Calls an API through the hub. While the service isn't connected yet the call
+  waits up to `timeout`. Raises if the service has not been started or still isn't
+  connected. Returns `{:ok, response}` or `{:error, reason}`.
   """
   def send(service, path, body \\ nil, context \\ nil, timeout \\ 5_000)
 
-  def send(%__MODULE__{conn: nil}, _path, _body, _context, _timeout) do
-    raise "Service not started"
+  def send(%__MODULE__{conn: nil} = service, _path, _body, _context, _timeout) do
+    raise service.refusal || "Service not started"
   end
 
   def send(%__MODULE__{conn: conn}, path, body, context, timeout) do
-    sender = Connection.sender(conn)
+    sender = Connection.sender(conn, timeout)
     ChannelEx.send(sender, path, body, context, timeout)
   end
 
   @doc """
-  Opens a stream call through the hub. Raises if the service has not been
-  started. Returns a lazy `Stream` of values.
+  Opens a stream call through the hub. While the service isn't connected yet the
+  call waits up to 10 s. Raises if the service has not been started or still isn't
+  connected. Returns a lazy `Stream` of values.
   """
   def values(service, path, body \\ nil, context \\ nil)
 
-  def values(%__MODULE__{conn: nil}, _path, _body, _context) do
-    raise "Service not started"
+  def values(%__MODULE__{conn: nil} = service, _path, _body, _context) do
+    raise service.refusal || "Service not started"
   end
 
   def values(%__MODULE__{conn: conn}, path, body, context) do
@@ -339,24 +355,50 @@ defmodule HubServiceEx do
 
   @doc """
   Connects to the hub. On every (re)connect sends `hub/profile/update` (if a
-  profile is set) then `hub/service/update`. Reconnects automatically.
+  profile is set) then `hub/service/update`. Reconnects automatically. Returns
+  while the first connect is still going: `send/5` and `values/4` wait for it. An
+  address that would carry the key unencrypted isn't dialed.
   """
   def start(%__MODULE__{conn: nil} = service) do
-    {:ok, conn} = Connection.start_link(service)
+    case refusal(service) do
+      nil ->
+        {:ok, conn} = Connection.start_link(service)
+        %{service | conn: conn, refusal: nil}
 
-    # The hub may be down or refuse the first connect; the connection keeps
-    # retrying and send/values fetch the current sender anyway.
-    sender =
-      try do
-        Connection.sender(conn)
-      rescue
-        _ -> nil
-      end
-
-    %{service | conn: conn, sender: sender}
+      message ->
+        IO.puts(:stderr, "hub-service: #{message}")
+        %{service | refusal: message}
+    end
   end
 
   def start(%__MODULE__{} = service), do: service
+
+  @doc "Stops the connection and its retries. Calls waiting for a connection raise."
+  def stop(%__MODULE__{conn: nil} = service), do: service
+
+  def stop(%__MODULE__{conn: conn} = service) do
+    Connection.stop(conn)
+    %{service | conn: nil}
+  end
+
+  defp refusal(%__MODULE__{address: address} = service) when is_binary(address) do
+    key = address_key(service)
+
+    cond do
+      String.starts_with?(key, ["wss://", "https://"]) ->
+        # channel_ex has no TLS: it would send the upgrade, and the key, in the clear.
+        "#{key} needs TLS, which channel_ex's client doesn't have, and would carry this service's key unencrypted"
+
+      transport(service) == :refused and not service.allow_plaintext ->
+        "#{key} would carry this service's key unencrypted. Use a local address, or set :allow_plaintext " <>
+          "(HUB_ALLOW_PLAINTEXT=1) on a private network"
+
+      true ->
+        nil
+    end
+  end
+
+  defp refusal(_service), do: nil
 
   @doc """
   hub/profile/update payload (ordered jiffy object), or `nil` when no profile

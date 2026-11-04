@@ -193,7 +193,7 @@ defmodule HubServiceEx.NetworkTest do
     test = self()
 
     hub =
-      ChannelEx.new()
+      HubServiceEx.FakeHub.answer_hub_info(ChannelEx.new())
       |> ChannelEx.post("hub/service/update", fn _ -> nil end)
       |> ChannelEx.post("network/shares/replace", fn request ->
         send(test, :replaced)

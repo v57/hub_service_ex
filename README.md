@@ -1,11 +1,10 @@
 # hub_service_ex
 
 Elixir port of the [hub-service](https://github.com/v57/hub-service) library: connect to a hub
-(hub-lite/hub-server), host post/stream API endpoints, and call API through the hub.
+(hub-server), host post/stream API endpoints, and call API through the hub.
 
-hub-server auth is supported: every (re)connect sends `auth` + `v` headers signed by the ed25519
-keychain (`auth` key file in the cwd, or `$HUBKEY`), bound to the hub's key once it is pinned
-(`v: "1"`). hub-lite ignores the headers. Wire parity with the TS reference:
+hub-server auth is supported: every (re)connect asks the hub to prove its key, then sends a fresh
+`auth` token signed by the ed25519 keychain (`auth` key file in the cwd, or `$HUBKEY`). Wire parity with the TS reference:
 `hub/profile/update` and `hub/service/update` payloads are built as ordered jiffy objects so the
 JSON bytes match the TS/Go ports exactly.
 
@@ -35,11 +34,20 @@ Run the example: `mix run example/echo.exs`
 ## API
 
 - `new(options \\ [])` — options: `:address` (port int or `ws://` string; default `1997` or `$HUB`),
-  `:name`, `:icon` (string or `%{symbol: ..., text: ...}`), `:sign`, `:hub_key`.
-- Hub-bound auth: the first connect uses `v: "0"`, asks `hub/info` for the hub key, pins it in
-  `hubs.json` beside the key file and reconnects with `v: "1"` (`:hub_key` supplies it up front,
-  `forget_hub_key/1` clears the pin, `last_error/1` reports a refused connect).
-  `Keychain.sign/0` / `Keychain.sign_hub/1` make the tokens.
+  `:name`, `:icon` (string or `%{symbol: ..., text: ...}`), `:sign` (custom token factory given the
+  proven hub key and the challenge; turns off device mode), `:hub_key`, `:allow_plaintext` (dial plain
+  `ws://` beyond loopback, the overlay and the LAN; also `HUB_ALLOW_PLAINTEXT=1`).
+- Hub-bound tokens (`Docs/Devices/protocol.md` section 2): a token signs
+  `hub1:<hub key>:<nonce>:<expiry>`, so it works once, on the hub it was made for. Before every
+  connect the service asks `hub/info` with a fresh nonce on a short anonymous connection. Only an
+  answer with a valid proof of the key it claims gets a token, over that answer's challenge. The
+  first proven key is pinned in `hubs.json` beside the key file. A hub that doesn't prove its key, or
+  answers with another than the pinned one, gets nothing and is reported while the service keeps
+  trying, so calls made right after `start()` wait up to their timeout instead of being lost. Plain
+  `ws://` beyond loopback, the overlay and the LAN isn't dialed unless `:allow_plaintext` says so
+  (`HubProof.transport_of/1` classifies an address). channel_ex's client has no TLS, so `wss://`
+  isn't dialed at all. `:hub_key` supplies the key up front, `forget_hub_key/1` clears the pin,
+  `last_error/1` reports the last failure. `Keychain.sign_hub/2` makes a token.
 - Device mode (on by default): every connect also sends a `device` header, a 7-day certificate for
   the service key signed by the device key (`~/.hub/device.key`, `$HUB_DEVICE_KEY` or
   `:device_key_path`, created 0600; `:device_key` for a `KeyFile` kept elsewhere), renewed at
@@ -72,7 +80,8 @@ Run the example: `mix run example/echo.exs`
 - `values(path, body \\ nil)` — stream call through the hub; returns a lazy `Stream`.
 - `start()` — connect; on every (re)connect sends `hub/profile/update` (if name/icon set) then
   `hub/service/update`. Reconnects automatically (channel_ex's client does not auto-reconnect, so
-  the service owns a reconnect loop; hub-lite drops a sender's services on disconnect).
+  the service owns a reconnect loop; the hub drops a sender's services on disconnect).
+- `stop()` — closes the connection and ends its retries.
 
 Register paths before `start()` — the update payload is snapshotted at connect time (TS parity).
 

@@ -3,18 +3,16 @@ defmodule HubServiceEx.Connection do
   # Owns the hub websocket connection. channel_ex's client socket does NOT
   # auto-reconnect (it stops on tcp_closed/tcp_error), so this GenServer
   # monitors the socket and re-dials on disconnect. On every (re)connect the
-  # socket's on_connect callback fires `HubServiceEx.send_updates/2`, which
-  # re-sends hub/profile/update + hub/service/update (hub-lite drops a
-  # sender's services on disconnect). Every (re)connect also carries fresh
-  # hub-server auth headers ({auth: <signed token>, v}) — the headers map is
-  # built here once per dial, so the token is always freshly signed (TS
-  # reference parity). hub-lite ignores the headers.
+  # socket's on_connect callback tells this GenServer, which re-sends
+  # hub/profile/update + hub/service/update (the hub drops a sender's services on
+  # disconnect).
   #
-  # Hub-bound auth: while no hub key is known, on_connect hands the sender to
-  # this GenServer, which asks `hub/info` from a task (a blocking call inside
-  # the socket's own callback would wait on itself). A key from it is pinned
-  # and the connection re-dialed at once with a v1 token; an error (hub-lite)
-  # keeps v0 and sends the updates.
+  # Auth v2 (protocol.md section 2): channel_ex takes its headers before dialing,
+  # so every attempt starts here. A task asks `hub/info` on a short anonymous
+  # connection with a fresh nonce, so this process stays free meanwhile; only an
+  # answer with a valid proof that matches the pin leads to a dial, with a token
+  # over that answer's challenge. Anything else sends the hub nothing and retries
+  # with a growing delay. Calls wait for the dial (`sender/2`).
   #
   # Hub Network shares live here too: declared ones are republished from a
   # task after every connect, and publish/update/remove calls attest and
@@ -22,20 +20,30 @@ defmodule HubServiceEx.Connection do
 
   use GenServer
 
-  alias HubServiceEx.HubPins
+  alias HubServiceEx.{HubPins, HubProof}
 
   @reconnect_delay 1_000
+  @handshake_max_delay 30_000
+  @hub_info_timeout 5_000
 
   def start_link(service) do
     GenServer.start_link(__MODULE__, service)
   end
 
-  @doc "Current sender, or raises `Service not started` when disconnected."
+  @doc """
+  Current sender. While disconnected the caller waits for a connection, up to
+  `timeout`, then raises `Service not started`, as it does once the service stopped.
+  """
   def sender(pid, timeout \\ 10_000) do
-    case GenServer.call(pid, :sender, timeout) do
-      {:ok, sender} -> sender
-      :error -> raise "Service not started"
-    end
+    GenServer.call(pid, :sender, timeout)
+  catch
+    :exit, _reason -> raise "Service not started"
+  end
+
+  def stop(pid) do
+    GenServer.stop(pid)
+  catch
+    :exit, _reason -> :ok
   end
 
   def hub_key(pid), do: GenServer.call(pid, :hub_key)
@@ -58,6 +66,9 @@ defmodule HubServiceEx.Connection do
       sender: nil,
       mon: nil,
       retry: nil,
+      handshake: nil,
+      handshake_delay: @reconnect_delay,
+      waiting: [],
       last_error: nil,
       device: HubServiceEx.Device.new_cache(),
       shares: service.shares,
@@ -74,11 +85,11 @@ defmodule HubServiceEx.Connection do
 
   @impl true
   def handle_call(:sender, _from, %{sender: sender} = state) when not is_nil(sender) do
-    {:reply, {:ok, sender}, state}
+    {:reply, sender, state}
   end
 
-  def handle_call(:sender, _from, state) do
-    {:reply, :error, state}
+  def handle_call(:sender, from, state) do
+    {:noreply, %{state | waiting: [from | state.waiting]}}
   end
 
   def handle_call(:hub_key, _from, state), do: {:reply, state.hub_key, state}
@@ -116,49 +127,20 @@ defmodule HubServiceEx.Connection do
 
   @impl true
   def handle_info({:connected, client_ws, sender}, state) do
-    state = %{state | last_error: nil}
-
-    cond do
-      not current?(state, client_ws) ->
-        {:noreply, state}
-
-      state.service.pins == nil or state.hub_key != nil ->
-        HubServiceEx.send_updates(state.service, sender)
-        {:noreply, republish(state, client_ws, sender)}
-
-      true ->
-        owner = self()
-
-        Task.start(fn ->
-          send(owner, {:hub_info, client_ws, sender, ChannelEx.send(sender, "hub/info", nil, nil, 5_000)})
-        end)
-
-        {:noreply, state}
+    if current?(state, client_ws) do
+      HubServiceEx.send_updates(state.service, sender)
+      {:noreply, republish(%{state | last_error: nil}, client_ws, sender)}
+    else
+      {:noreply, state}
     end
   end
 
-  def handle_info({:hub_info, client_ws, sender, result}, state) do
-    cond do
-      not current?(state, client_ws) ->
-        {:noreply, state}
+  def handle_info({:hub_proof, ref, result}, %{handshake: ref} = state) do
+    state = %{state | handshake: nil}
 
-      key = hub_info_key(result) ->
-        # An unwritable pin file keeps the key for this process only.
-        try do
-          HubPins.put(state.service.pins, HubServiceEx.address_key(state.service), key)
-        rescue
-          _ -> :ok
-        end
-
-        HubServiceEx.put_current_hub_key(state.service, key)
-
-        # Pinned the hub key: reconnect at once with a v1 token.
-        {:noreply, state |> Map.put(:hub_key, key) |> drop_client() |> connect()}
-
-      true ->
-        # hub-lite or an older hub-pro: stay on v0.
-        HubServiceEx.send_updates(state.service, sender)
-        {:noreply, republish(state, client_ws, sender)}
+    case check_proof(state, result) do
+      {:ok, state, key, challenge} -> {:noreply, dial(%{state | handshake_delay: @reconnect_delay}, key, challenge)}
+      {:error, message} -> {:noreply, state |> report("#{address(state)}: #{message}, sending it nothing") |> retry_handshake()}
     end
   end
 
@@ -191,6 +173,12 @@ defmodule HubServiceEx.Connection do
 
   def handle_info(_message, state) do
     {:noreply, state}
+  end
+
+  @impl true
+  def terminate(_reason, state) do
+    drop_client(state)
+    :ok
   end
 
   # Attests and replaces the whole share set; keeps the old set on failure.
@@ -239,9 +227,6 @@ defmodule HubServiceEx.Connection do
     publications |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(&elem(&1, 1))
   end
 
-  defp hub_info_key({:ok, %{"key" => key}}) when is_binary(key), do: key
-  defp hub_info_key(_), do: nil
-
   defp current?(%{client: %ChannelEx.ClientSender{ws: ws}}, ws), do: true
   defp current?(_state, _ws), do: false
 
@@ -259,53 +244,110 @@ defmodule HubServiceEx.Connection do
     %{state | client: nil, sender: nil, mon: nil}
   end
 
+  # Starts an attempt: a task asks the hub for its proof, and `{:hub_proof, ..}`
+  # goes on from there.
+  defp connect(%{handshake: ref} = state) when not is_nil(ref), do: state
+  defp connect(%{client: client} = state) when not is_nil(client), do: state
+
   defp connect(%{service: service, retry: retry} = state) do
     if retry, do: Process.cancel_timer(retry)
     owner = self()
+    ref = make_ref()
+
+    Task.start(fn ->
+      # The asking socket is linked here: its exit must still end in an answer.
+      Process.flag(:trap_exit, true)
+
+      result =
+        try do
+          HubProof.ask(service.address, @hub_info_timeout)
+        rescue
+          error -> {:error, Exception.message(error)}
+        catch
+          _, reason -> {:error, inspect(reason)}
+        end
+
+      send(owner, {:hub_proof, ref, result})
+    end)
+
+    %{state | handshake: ref, retry: nil}
+  end
+
+  # Takes a proven answer only if it matches the pin, and pins a first key.
+  defp check_proof(_state, {:error, message}), do: {:error, message}
+
+  defp check_proof(%{service: service} = state, {:ok, %{"key" => key, "challenge" => challenge}}) do
+    pinned = state.hub_key || HubPins.get(service.pins, HubServiceEx.address_key(service))
+
+    cond do
+      pinned == nil ->
+        # An unwritable pin file keeps the key for this process only.
+        try do
+          HubPins.put(service.pins, HubServiceEx.address_key(service), key)
+        rescue
+          error -> IO.puts(:stderr, "hub-service: pin hub key: #{Exception.message(error)}")
+        end
+
+        HubServiceEx.put_current_hub_key(service, key)
+        {:ok, %{state | hub_key: key}, key, challenge}
+
+      pinned == key ->
+        HubServiceEx.put_current_hub_key(service, key)
+        {:ok, %{state | hub_key: key}, key, challenge}
+
+      true ->
+        {:error, "it answers with key #{key}, not the pinned #{pinned}. Call forget_hub_key/1 if its key really changed"}
+    end
+  end
+
+  defp dial(%{service: service} = state, key, challenge) do
+    owner = self()
     {device, device_cache} = HubServiceEx.Device.header(service, state.device)
     state = %{state | device: device_cache}
-    headers = HubServiceEx.auth_headers(service, state.hub_key, device)
-
-    on_connect =
-      if service.pins == nil or state.hub_key != nil do
-        fn sender -> HubServiceEx.send_updates(service, sender) end
-      else
-        fn sender -> send(owner, {:connected, self(), sender}) end
-      end
+    headers = HubServiceEx.auth_headers(service, key, challenge, device)
 
     case ChannelEx.connect(service.channel, service.address,
            headers: fn -> headers end,
-           on_connect: on_connect
+           on_connect: fn sender -> send(owner, {:connected, self(), sender}) end
          ) do
       %ChannelEx.ClientSender{} = client ->
         mon = Process.monitor(client.ws)
-        %{state | client: client, sender: client.sender, mon: mon, retry: nil}
+        Enum.each(state.waiting, &GenServer.reply(&1, client.sender))
+        %{state | client: client, sender: client.sender, mon: mon, retry: nil, waiting: []}
 
       # Refused connection, failed handshake or silent hub: retry later.
       {:error, reason} ->
-        state |> report_error(headers, reason) |> schedule_reconnect()
+        state |> report_error(reason) |> schedule_reconnect()
     end
   rescue
-    error -> state |> report_error(%{}, error) |> schedule_reconnect()
+    error -> state |> report_error(error) |> schedule_reconnect()
   catch
-    _, reason -> state |> report_error(%{}, reason) |> schedule_reconnect()
+    _, reason -> state |> report_error(reason) |> schedule_reconnect()
   end
 
-  defp report_error(state, headers, reason) do
+  defp address(state), do: HubServiceEx.address_key(state.service)
+
+  defp report_error(state, reason) do
     message = if is_exception(reason), do: Exception.message(reason), else: inspect(reason)
 
     # hub-server refuses a bad token with HTTP 401 (a failed handshake here); its reason (invalid
     # signature, key revoked) stays on the hub.
-    if headers["v"] == "1" and match?({:handshake_failed, _}, reason) and message != state.last_error do
-      IO.puts(
-        :stderr,
-        "hub-service: the hub at #{HubServiceEx.address_key(state.service)} refused the v1 connect for " <>
-          "hub key #{state.hub_key} (#{message}). If the hub key changed or a different server answers, " <>
-          "call forget_hub_key/1."
-      )
-    end
+    report(
+      state,
+      "connect to #{address(state)} (hub key #{state.hub_key}) failed: #{message}. " <>
+        "If the hub key changed or a different server answers, call forget_hub_key/1."
+    )
+  end
 
+  # Records a failure, and reports it once per distinct message.
+  defp report(state, message) do
+    if message != state.last_error, do: IO.puts(:stderr, "hub-service: #{message}")
     %{state | last_error: message}
+  end
+
+  defp retry_handshake(state) do
+    ref = Process.send_after(self(), :reconnect, state.handshake_delay)
+    %{state | retry: ref, handshake_delay: min(state.handshake_delay * 2, @handshake_max_delay)}
   end
 
   defp schedule_reconnect(%{retry: nil} = state) do

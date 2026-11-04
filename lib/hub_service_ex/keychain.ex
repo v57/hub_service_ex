@@ -9,13 +9,13 @@ defmodule HubServiceEx.Keychain do
     base64 encoding of the 48-byte PKCS8 DER ed25519 private key followed by
     the 44-byte SPKI DER public key (92 bytes total, 124 base64 chars). If the
     file is missing it is generated on first use.
-  - A signed token has the shape `key.<pub>.<sig>.<expiry>` where:
+  - A signed token has the shape `key.<pub>.<sig>.<expiry>.<nonce>` where:
       pub     = base64 of the 44-byte SPKI public key (bytes 48..92)
-      expiry  = DECIMAL epoch-seconds string of now + 60
-      sig     = base64 ed25519 signature over `<expiry>` (header `v: 0`) or
-                over `hub1:<hub SPKI>:<expiry>` (header `v: 1`, bound to one
-                hub). hub-server allows 30 s of clock skew and at most 300 s
-                ahead.
+      expiry  = DECIMAL epoch-seconds string of now + 30
+      nonce   = the challenge the hub answered in `hub/info`
+      sig     = base64 ed25519 signature over
+                `hub1:<hub SPKI>:<nonce>:<expiry>`, for one connection to one
+                hub. hub-server allows 30 s of clock skew and at most 60 s ahead.
   - The hub verifies the signature against the embedded public key and
     treats the key as the connection identity (owner/host/group).
 
@@ -24,14 +24,13 @@ defmodule HubServiceEx.Keychain do
 
   Usage:
 
-      token = HubServiceEx.Keychain.sign()            # fresh v0 token for a connect
-      token = HubServiceEx.Keychain.sign_hub(hub_key) # fresh v1 token for that hub
-      pub = HubServiceEx.Keychain.public_key()        # the service's public key
+      token = HubServiceEx.Keychain.sign_hub(hub_key, nonce) # a token for one connect to that hub
+      pub = HubServiceEx.Keychain.public_key()               # the service's public key
   """
 
   alias HubServiceEx.KeyFile
 
-  @default_expires 60
+  @default_expires 30
 
   @doc """
   Overrides the key file location (default: `auth` in the cwd, or `$HUBKEY`).
@@ -65,26 +64,18 @@ defmodule HubServiceEx.Keychain do
   def public_key, do: KeyFile.public_key(key())
 
   @doc """
-  A fresh v0 auth token: `key.<pub>.<sig>.<expiry>`.
-
-  `expires` is the token lifetime in seconds (default 60).
+  A fresh auth token for one connection to the hub `hub_key` (its SPKI), over its
+  `nonce`: `key.<pub>.<sig>.<expiry>.<nonce>`. `expires` is the token lifetime in
+  seconds (default 30).
   """
-  def sign(expires \\ @default_expires) when is_integer(expires) do
-    token(key(), nil, System.system_time(:second) + expires)
+  def sign_hub(hub_key, nonce, expires \\ @default_expires)
+      when is_binary(hub_key) and is_binary(nonce) and is_integer(expires) do
+    token(key(), hub_key, nonce, System.system_time(:second) + expires)
   end
 
-  @doc "A fresh v1 auth token bound to `hub_key` (the hub's SPKI)."
-  def sign_hub(hub_key, expires \\ @default_expires) when is_binary(hub_key) and is_integer(expires) do
-    token(key(), hub_key, System.system_time(:second) + expires)
-  end
-
-  @doc """
-  An auth token with `key` expiring at `expiry`: v1 (over
-  `hub1:<hub_key>:<expiry>`) when `hub_key` is set, else v0 (over `<expiry>`).
-  """
-  def token(%KeyFile{} = key, hub_key, expiry) when is_integer(expiry) do
+  @doc "An auth token with `key` over `hub1:<hub_key>:<nonce>:<expiry>`."
+  def token(%KeyFile{} = key, hub_key, nonce, expiry) when is_integer(expiry) do
     data = Integer.to_string(expiry)
-    signed = if hub_key, do: "hub1:#{hub_key}:#{data}", else: data
-    "key.#{KeyFile.public_key(key)}.#{KeyFile.sign(key, signed)}.#{data}"
+    "key.#{KeyFile.public_key(key)}.#{KeyFile.sign(key, "hub1:#{hub_key}:#{nonce}:#{data}")}.#{data}.#{nonce}"
   end
 end

@@ -28,33 +28,33 @@ defmodule HubServiceEx.KeychainTest do
     assert Keychain.public_key() == @ts_pub
   end
 
-  test "sign produces key.<pub>.<sig>.<decimalExpiry> and the signature verifies", %{tmp: tmp} do
+  test "sign_hub produces key.<pub>.<sig>.<decimalExpiry>.<nonce> and the signature verifies", %{tmp: tmp} do
     use_auth(tmp, @ts_auth)
 
-    token = Keychain.sign()
-    assert ["key", pub, sig, expiry] = String.split(token, ".")
+    token = Keychain.sign_hub("hub-key", "nonce")
+    assert ["key", pub, sig, expiry, "nonce"] = String.split(token, ".")
     assert pub == @ts_pub
 
     # expiry is a decimal epoch-seconds string (TS parity; hub-server rejects
-    # it once expired or if over 5 minutes ahead)
+    # it once expired or if over a minute ahead)
     assert {expiry_epoch, ""} = Integer.parse(expiry)
-    assert_in_delta expiry_epoch, System.system_time(:second) + 60, 2
+    assert_in_delta expiry_epoch, System.system_time(:second) + 30, 2
 
-    # signature is 64-byte ed25519 over the expiry string, verifiable with
+    # signature is 64-byte ed25519 over the hub-bound string, verifiable with
     # the raw public key embedded in the SPKI DER (bytes 48..92 -> raw pub)
     assert byte_size(Base.decode64!(sig)) == 64
     bytes = Base.decode64!(@ts_auth)
     raw_pub = binary_part(bytes, 48 + 12, 32)
 
-    assert :crypto.verify(:eddsa, :ed25519, expiry, Base.decode64!(sig), [raw_pub, :ed25519])
+    assert :crypto.verify(:eddsa, :ed25519, "hub1:hub-key:nonce:#{expiry}", Base.decode64!(sig), [raw_pub, :ed25519])
   end
 
-  test "sign honours a custom expires offset", %{tmp: tmp} do
+  test "sign_hub honours a custom expires offset", %{tmp: tmp} do
     use_auth(tmp, @ts_auth)
 
-    [_key, _pub, _sig, expiry] = String.split(Keychain.sign(30), ".")
+    [_key, _pub, _sig, expiry, _nonce] = String.split(Keychain.sign_hub("hub-key", "nonce", 12), ".")
     {expiry_epoch, ""} = Integer.parse(expiry)
-    assert_in_delta expiry_epoch, System.system_time(:second) + 30, 2
+    assert_in_delta expiry_epoch, System.system_time(:second) + 12, 2
   end
 
   test "auth file round-trip: generates when missing, loads back identically" do
@@ -85,11 +85,11 @@ defmodule HubServiceEx.KeychainTest do
     assert Keychain.public_key() == pub1
 
     # and the generated key actually signs/verifies
-    token = Keychain.sign()
-    assert ["key", pub, sig, expiry] = String.split(token, ".")
+    token = Keychain.sign_hub("hub-key", "nonce")
+    assert ["key", pub, sig, expiry, "nonce"] = String.split(token, ".")
     assert pub == pub1
     raw_pub = binary_part(bytes, 48 + 12, 32)
-    assert :crypto.verify(:eddsa, :ed25519, expiry, Base.decode64!(sig), [raw_pub, :ed25519])
+    assert :crypto.verify(:eddsa, :ed25519, "hub1:hub-key:nonce:#{expiry}", Base.decode64!(sig), [raw_pub, :ed25519])
 
     File.rm_rf!(tmp)
   end

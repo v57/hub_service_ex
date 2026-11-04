@@ -1,5 +1,5 @@
 defmodule HubServiceEx.FakeHubTest do
-  # End to end against a fake hub: hub/info pinning, the v1 reconnect, the device header and caller identity.
+  # End to end against a fake hub: the proof, pinning, the device header and caller identity.
   use ExUnit.Case, async: false
 
   alias HubServiceEx.Keychain
@@ -14,9 +14,7 @@ defmodule HubServiceEx.FakeHubTest do
 
     hub =
       ChannelEx.new()
-      |> ChannelEx.post("hub/info", fn _ ->
-        %{"key" => @hub_key, "protocol" => 1, "pro" => true, "mode" => "default-allow"}
-      end)
+      |> HubServiceEx.FakeHub.answer_hub_info()
       |> ChannelEx.post("hub/service/update", fn _ ->
         send(test, :update)
         nil
@@ -51,21 +49,27 @@ defmodule HubServiceEx.FakeHubTest do
     :gen_tcp.close(probe)
 
     service =
-      HubServiceEx.new(address: "ws://127.0.0.1:#{port}", device: false, sign: fn -> "key.x.y.1" end)
+      HubServiceEx.new(address: "ws://127.0.0.1:#{port}", device: false, sign: fn _key, _nonce -> "key.x.y.1" end)
       |> HubServiceEx.post("echo", & &1)
       |> HubServiceEx.start()
 
-    assert_raise RuntimeError, "Service not started", fn -> HubServiceEx.send(service, "echo", 1) end
+    assert_raise RuntimeError, "Service not started", fn -> HubServiceEx.send(service, "echo", 1, nil, 50) end
 
     test = self()
-    hub = ChannelEx.post(ChannelEx.new(), "hub/service/update", fn _ -> send(test, :late_update) end)
+
+    hub =
+      ChannelEx.new()
+      |> HubServiceEx.FakeHub.answer_hub_info()
+      |> ChannelEx.post("hub/service/update", fn _ -> send(test, :late_update) end)
+
     listener = ChannelEx.listen(hub, port)
     on_exit(fn -> ChannelEx.ServerListener.stop(listener) end)
     assert_receive :late_update, 5_000
-    assert File.ls!(tmp) == []
+    assert File.ls!(tmp) == ["hubs.json"]
+    HubServiceEx.stop(service)
   end
 
-  test "pins the hub key from hub/info and reconnects with v1", %{tmp: tmp, port: port} do
+  test "proves, pins and sees the caller", %{tmp: tmp, port: port} do
     address = "ws://127.0.0.1:#{port}"
 
     service =
@@ -88,24 +92,22 @@ defmodule HubServiceEx.FakeHubTest do
       end)
       |> HubServiceEx.start()
 
+    # hub/info on an anonymous connection, then the service's own connection and its update.
     assert_receive {:connect, first}, 5_000
-    assert first["v"] == "0"
+    refute Map.has_key?(first, "auth")
     assert_receive {:connect, second}, 5_000
     assert second["v"] == "1"
-    # The updates go only to the v1 connection.
     assert_receive :update, 5_000
     refute_receive {:connect, _}, 200
 
-    ["key", pub, sig, expiry] = String.split(second["auth"], ".")
-    assert verifies?(pub, "hub1:#{@hub_key}:#{expiry}", sig)
+    ["key", pub, sig, expiry, nonce] = String.split(second["auth"], ".")
+    assert verifies?(pub, "hub1:#{@hub_key}:#{nonce}:#{expiry}", sig)
     assert File.read!(Path.join(tmp, "hubs.json")) == ~s({"#{address}":"#{@hub_key}"})
     assert HubServiceEx.hub_key(service) == @hub_key
 
     payload = HubServiceEx.Device.decode_certificate(second["device"])
     assert payload["service"] == pub
     assert payload["instance"] == "Echo"
-    # Reconnects reuse the certificate.
-    assert first["device"] == second["device"]
 
     context = %{
       "service" => "s1",
@@ -120,7 +122,7 @@ defmodule HubServiceEx.FakeHubTest do
       }
     }
 
-    # The latest hub-side sender is the v1 connection's.
+    # The latest hub-side sender is the service's own connection.
     hub_sender = last_hub_sender()
 
     assert {:ok, %{"key" => ^pub, "device" => "Mac Studio", "owner" => true, "hubKey" => @hub_key, "service" => "s1"}} =

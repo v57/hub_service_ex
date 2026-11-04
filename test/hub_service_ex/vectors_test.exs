@@ -4,7 +4,7 @@ defmodule HubServiceEx.VectorsTest do
   # exact strings must match.
   use ExUnit.Case, async: true
 
-  alias HubServiceEx.{Caller, Device, KeyFile, Keychain}
+  alias HubServiceEx.{Caller, Device, HubProof, KeyFile, Keychain}
 
   @vectors __DIR__ |> Path.join("../fixtures/device-vectors.json") |> File.read!() |> Jason.decode!()
 
@@ -22,16 +22,50 @@ defmodule HubServiceEx.VectorsTest do
     assert Device.safety_code(public_key("device")) == @vectors["keys"]["device"]["safetyCode"]
   end
 
-  test "auth tokens v0 and v1" do
+  test "auth token" do
     auth = @vectors["auth"]
     service = key("service")
 
-    assert KeyFile.sign(service, auth["v0"]["signedData"]) == auth["v0"]["signature"]
-    assert Keychain.token(service, nil, auth["expiry"]) == auth["v0"]["header"]
-
-    assert auth["v1"]["signedData"] == "hub1:#{public_key("hub")}:#{auth["expiry"]}"
+    assert auth["v1"]["signedData"] == "hub1:#{public_key("hub")}:#{auth["nonce"]}:#{auth["expiry"]}"
     assert KeyFile.sign(service, auth["v1"]["signedData"]) == auth["v1"]["signature"]
-    assert Keychain.token(service, public_key("hub"), auth["expiry"]) == auth["v1"]["header"]
+    assert Keychain.token(service, public_key("hub"), auth["nonce"], auth["expiry"]) == auth["v1"]["header"]
+  end
+
+  test "hub/info proof" do
+    vector = @vectors["hubInfo"]
+    hub = public_key("hub")
+    nonce = vector["nonce"]
+    info = %{"key" => hub, "proof" => vector["proof"], "challenge" => "c"}
+
+    assert HubProof.signed_data(hub, nonce) == vector["signedData"]
+    assert HubProof.proves?(info, nonce)
+    refute HubProof.proves?(info, "another-nonce-another-nonce")
+    refute HubProof.proves?(%{info | "key" => public_key("service")}, nonce)
+    refute HubProof.proves?(Map.delete(info, "proof"), nonce)
+    refute HubProof.proves?(Map.delete(info, "challenge"), nonce)
+    refute HubProof.proves?(%{info | "proof" => "not base64!"}, nonce)
+    refute HubProof.proves?(%{info | "key" => "not a key"}, nonce)
+    refute HubProof.proves?(nil, nonce)
+  end
+
+  test "transports" do
+    names = %{
+      "encrypted" => :encrypted,
+      "loopback" => :loopback,
+      "overlay" => :overlay,
+      "localNetwork" => :local_network,
+      "refused" => :refused
+    }
+
+    assert @vectors["transport"] != []
+
+    for %{"url" => url, "transport" => transport} <- @vectors["transport"] do
+      assert {url, HubProof.transport_of(url)} == {url, names[transport]}
+    end
+
+    assert HubProof.transport_of(1997) == :loopback
+    assert HubProof.transport_of("1997") == :loopback
+    assert HubProof.transport_of("hub:1997") == :refused
   end
 
   test "certificate" do

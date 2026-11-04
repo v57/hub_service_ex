@@ -38,7 +38,7 @@ defmodule HubServiceEx.DeviceTest do
 
   test "connect headers carry a signed certificate", ctx do
     service = service(ctx, name: "Echo", device_name: "Mac Studio", platform: "macos")
-    headers = HubServiceEx.connect_headers(service)
+    headers = HubServiceEx.connect_headers(service, "hub-key", "challenge")
     [payload_part, signature] = String.split(headers["device"], ".")
     payload = Device.decode_certificate(headers["device"])
     device_key = KeyFile.public_key(KeyFile.load!(ctx.device_key_path))
@@ -75,18 +75,18 @@ defmodule HubServiceEx.DeviceTest do
   end
 
   test "parent is declared", ctx do
-    headers = HubServiceEx.connect_headers(service(ctx, device_name: "builder", platform: "linux", parent: "Mac Studio"))
+    headers = HubServiceEx.connect_headers(service(ctx, device_name: "builder", platform: "linux", parent: "Mac Studio"), "hub-key", "challenge")
     assert Device.decode_certificate(headers["device"])["parent"] == "Mac Studio"
   end
 
   test "device mode can be turned off", ctx do
-    refute Map.has_key?(HubServiceEx.connect_headers(service(ctx, device: false)), "device")
+    refute Map.has_key?(HubServiceEx.connect_headers(service(ctx, device: false), "hub-key", "challenge"), "device")
     refute File.exists?(ctx.device_key_path)
   end
 
   test "a caller-provided key is used", ctx do
     key = KeyFile.generate()
-    headers = HubServiceEx.connect_headers(service(ctx, device_key: key))
+    headers = HubServiceEx.connect_headers(service(ctx, device_key: key), "hub-key", "challenge")
     assert Device.decode_certificate(headers["device"])["device"] == KeyFile.public_key(key)
     refute File.exists?(ctx.device_key_path)
   end
