@@ -19,7 +19,10 @@ defmodule HubServiceEx.VectorsTest do
 
   test "device id and safety code" do
     assert Device.id(public_key("device")) == @vectors["keys"]["device"]["deviceId"]
-    assert Device.safety_code(public_key("device")) == @vectors["keys"]["device"]["safetyCode"]
+
+    for code <- @vectors["safetyCode"]["cases"] do
+      assert Device.safety_code(code["hubKey"], code["deviceKey"], code["codeValue"]) == code["code"]
+    end
   end
 
   test "auth token" do

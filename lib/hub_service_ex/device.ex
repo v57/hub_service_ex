@@ -36,8 +36,9 @@ defmodule HubServiceEx.Device do
   def id(public_key), do: binary_part(hex(public_key), 0, 32)
 
   @doc ~s(The safety code shown while approving: `"ddd ddd"`.)
-  def safety_code(public_key) do
-    {n, ""} = public_key |> hex() |> binary_part(0, 8) |> Integer.parse(16)
+  def safety_code(hub_key, device_key, code_value) do
+    hash = :crypto.hash(:sha256, "hubcode1:#{hub_key}:#{device_key}:#{code_value}")
+    {n, ""} = hash |> Base.encode16(case: :lower) |> binary_part(0, 8) |> Integer.parse(16)
     code = n |> rem(1_000_000) |> Integer.to_string() |> String.pad_leading(6, "0")
     binary_part(code, 0, 3) <> " " <> binary_part(code, 3, 3)
   end
